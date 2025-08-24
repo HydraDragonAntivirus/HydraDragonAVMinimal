@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HydraDragon — STRICTLY in-process libclamav integration only.
+HydraDragon - STRICTLY in-process libclamav integration only.
 
 Requires the ClamAV subfolder with clamav.py module.
 If the module or libclamav fails to initialize, the script exits (no fallbacks).
@@ -433,39 +433,79 @@ def load_excluded_rules(filepath: str) -> Set[str]:
         return excluded
 
 def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -> List[Dict]:
+    """
+    Scans a file sequentially against all preloaded YARA rules.
+    Returns the first set of matched rules (stops after first hit).
+    Excludes rules in excluded_rules.
+    """
     with perf_monitor.timer("yara_scan_total"):
         data_content = None
+
+        # Rules that classify file type only (not malware) → ignore
+        benign_rules = {"PE_File_Magic", "ELF_File_Magic", "PDF_File_Magic"}
+
         for rule_filename in ORDERED_YARA_FILES:
             if rule_filename not in _global_yara_compiled:
                 continue
             compiled = _global_yara_compiled[rule_filename]
+
             try:
-                if rule_filename == 'yaraxtr.yrc' and _have_yara_x:
+                # --- yara-x mode ---
+                if rule_filename == "yaraxtr.yrc" and _have_yara_x:
                     if data_content is None:
                         with perf_monitor.timer("yara_x_file_read"):
-                            with open(file_path, 'rb') as f:
+                            with open(file_path, "rb") as f:
                                 data_content = f.read()
                         if not data_content:
                             continue
+
                     with perf_monitor.timer("yara_x_scan"):
                         scan_results = compiled.scan(data_content)
+
                     matched = []
-                    for rule in getattr(scan_results, 'matching_rules', []):
-                        if rule.identifier not in excluded_rules:
-                            matched.append({'rule': rule.identifier, 'tags': [], 'meta': {'source': rule_filename}})
+                    for rule in getattr(scan_results, "matching_rules", []):
+                        if rule.identifier in excluded_rules:
+                            continue
+                        if rule.identifier in benign_rules:
+                            logging.debug(f"Ignored benign/classifier rule {rule.identifier} for {file_path}")
+                            continue
+                        matched.append({
+                            "rule": rule.identifier,
+                            "tags": [],
+                            "meta": {"source": rule_filename},
+                        })
+
                     if matched:
                         return matched
+
+                # --- yara-python mode ---
                 else:
                     if not _have_yara:
                         continue
+
                     with perf_monitor.timer(f"yara_match_{rule_filename}"):
                         matches = compiled.match(filepath=file_path)
-                    filtered = [{'rule': m.rule, 'tags': m.tags, 'meta': getattr(m, 'meta', {})} for m in matches if m.rule not in excluded_rules]
+
+                    filtered = []
+                    for m in matches:
+                        if m.rule in excluded_rules:
+                            continue
+                        if m.rule in benign_rules:
+                            logging.debug(f"Ignored benign/classifier rule {m.rule} for {file_path}")
+                            continue
+                        filtered.append({
+                            "rule": m.rule,
+                            "tags": m.tags,
+                            "meta": getattr(m, "meta", {}),
+                        })
+
                     if filtered:
                         return filtered
+
             except Exception as e:
                 logging.error(f"Error during YARA scan with {rule_filename} on {file_path}: {e}")
                 continue
+
         return []
 
 # ---------------- ML (PE) logic ----------------
