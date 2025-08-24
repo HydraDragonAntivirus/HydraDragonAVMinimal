@@ -19,6 +19,7 @@ import string
 import threading
 from typing import List, Dict, Any, Optional, Set
 import argparse
+import numpy as np
 
 # Add ClamAV subfolder to Python path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -441,9 +442,6 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
     with perf_monitor.timer("yara_scan_total"):
         data_content = None
 
-        # Rules that classify file type only (not malware) → ignore
-        benign_rules = {"PE_File_Magic", "ELF_File_Magic", "PDF_File_Magic"}
-
         for rule_filename in ORDERED_YARA_FILES:
             if rule_filename not in _global_yara_compiled:
                 continue
@@ -456,24 +454,29 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                         with perf_monitor.timer("yara_x_file_read"):
                             with open(file_path, "rb") as f:
                                 data_content = f.read()
-                        if not data_content:
-                            continue
 
-                    with perf_monitor.timer("yara_x_scan"):
-                        scan_results = compiled.scan(data_content)
-
-                    matched = []
-                    for rule in getattr(scan_results, "matching_rules", []):
-                        if rule.identifier in excluded_rules:
-                            continue
-                        if rule.identifier in benign_rules:
-                            logging.debug(f"Ignored benign/classifier rule {rule.identifier} for {file_path}")
-                            continue
-                        matched.append({
-                            "rule": rule.identifier,
-                            "tags": [],
-                            "meta": {"source": rule_filename},
-                        })
+                    # Thread worker for yaraxtr_rule scanning (YARA-X)         
+                    try:                 
+                        if compiled:                     
+                            with perf_monitor.timer("yara_x_scan"):
+                                scan_results = compiled.scan(data_content)
+                            
+                            matched = []
+                            
+                            # Iterate through matching rules                     
+                            for rule in getattr(scan_results, "matching_rules", []):                         
+                                if rule.identifier not in excluded_rules:                             
+                                    matched.append({
+                                        "rule": rule.identifier,
+                                        "tags": [],
+                                        "meta": {"source": rule_filename},
+                                    })                                      
+                                else:                             
+                                    logging.info(f"Rule {rule.identifier} is excluded from yaraxtr_rule.")                                                  
+                        else:                     
+                            logging.error("yaraxtr_rule is not defined.")                 
+                    except Exception as e:                 
+                        logging.error(f"Error scanning with yaraxtr_rule: {e}")
 
                     if matched:
                         return matched
@@ -489,9 +492,6 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                     filtered = []
                     for m in matches:
                         if m.rule in excluded_rules:
-                            continue
-                        if m.rule in benign_rules:
-                            logging.debug(f"Ignored benign/classifier rule {m.rule} for {file_path}")
                             continue
                         filtered.append({
                             "rule": m.rule,
@@ -509,120 +509,697 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
         return []
 
 # ---------------- ML (PE) logic ----------------
-def is_pe_file_quick(file_path: str) -> bool:
+
+# --- PE Analysis and Feature Extraction Functions (NEWLY UPDATED) ---
+
+def extract_infos(file_path, rank=None):
+    """Extract information about file"""
+    file_name = os.path.basename(file_path)
+    if rank is not None:
+        return {'file_name': file_name, 'numeric_tag': rank}
+    else:
+        return {'file_name': file_name}
+
+def calculate_entropy(data: list) -> float:
+    """Calculate Shannon entropy of data (provided as a list of integers)."""
+    if not data:
+        return 0.0
+
+    total_items = len(data)
+    value_counts = [data.count(i) for i in range(256)]  # Count occurrences of each byte (0-255)
+
+    entropy = 0.0
+    for count in value_counts:
+        if count > 0:
+            p_x = count / total_items
+            entropy -= p_x * np.log2(p_x)
+
+    return entropy
+
+def get_callback_addresses(pe: pefile.PE, address_of_callbacks: int) -> List[int]:
+    """Retrieve callback addresses from the TLS directory."""
     try:
-        with open(file_path, 'rb') as f:
-            return f.read(2) == b'MZ'
+        callback_addresses = []
+        # Read callback addresses from the memory-mapped file
+        while True:
+            callback_address = pe.get_dword_at_rva(address_of_callbacks - pe.OPTIONAL_HEADER.ImageBase)
+            if callback_address == 0:
+                break  # End of callback list
+            callback_addresses.append(callback_address)
+            address_of_callbacks += 4  # Move to the next address (4 bytes for DWORD)
+
+        return callback_addresses
+    except Exception as e:
+        logging.error(f"Error retrieving TLS callback addresses: {e}")
+        return []
+
+def analyze_tls_callbacks(pe: pefile.PE) -> Dict[str, Any]:
+    """Analyze TLS (Thread Local Storage) callbacks and extract relevant details."""
+    try:
+        tls_callbacks = {}
+        # Check if the PE file has a TLS directory
+        if hasattr(pe, 'DIRECTORY_ENTRY_TLS'):
+            tls = pe.DIRECTORY_ENTRY_TLS.struct
+            tls_callbacks = {
+                'start_address_raw_data': tls.StartAddressOfRawData,
+                'end_address_raw_data': tls.EndAddressOfRawData,
+                'address_of_index': tls.AddressOfIndex,
+                'address_of_callbacks': tls.AddressOfCallBacks,
+                'size_of_zero_fill': tls.SizeOfZeroFill,
+                'characteristics': tls.Characteristics,
+                'callbacks': []
+            }
+
+            # If there are callbacks, extract their addresses
+            if tls.AddressOfCallBacks:
+                callback_array = get_callback_addresses(pe, tls.AddressOfCallBacks)
+                if callback_array:
+                    tls_callbacks['callbacks'] = callback_array
+
+        return tls_callbacks
+    except Exception as e:
+        logging.error(f"Error analyzing TLS callbacks: {e}")
+        return {}
+
+def analyze_dos_stub(pe) -> Dict[str, Any]:
+    """Analyze DOS stub program."""
+    try:
+        dos_stub = {
+            'exists': False,
+            'size': 0,
+            'entropy': 0.0,
+        }
+
+        if hasattr(pe, 'DOS_HEADER'):
+            stub_offset = pe.DOS_HEADER.e_lfanew - 64  # Typical DOS stub starts after DOS header
+            if stub_offset > 0:
+                dos_stub_data = pe.__data__[64:pe.DOS_HEADER.e_lfanew]
+                if dos_stub_data:
+                    dos_stub['exists'] = True
+                    dos_stub['size'] = len(dos_stub_data)
+                    dos_stub['entropy'] = calculate_entropy(list(dos_stub_data))
+
+        return dos_stub
+    except Exception as ex:
+        logging.error(f"Error analyzing DOS stub: {ex}")
+        return {}
+
+def analyze_certificates(pe) -> Dict[str, Any]:
+    """Analyze security certificates."""
+    try:
+        cert_info = {}
+        if hasattr(pe, 'DIRECTORY_ENTRY_SECURITY'):
+            cert_info['virtual_address'] = pe.DIRECTORY_ENTRY_SECURITY.VirtualAddress
+            cert_info['size'] = pe.DIRECTORY_ENTRY_SECURITY.Size
+
+            # Extract certificate attributes if available
+            if hasattr(pe, 'VS_FIXEDFILEINFO'):
+                info = pe.VS_FIXEDFILEINFO[0] # VS_FIXEDFILEINFO is a list
+                cert_info['fixed_file_info'] = {
+                    'signature': info.Signature,
+                    'struct_version': info.StrucVersion,
+                    'file_version': f"{info.FileVersionMS >> 16}.{info.FileVersionMS & 0xFFFF}.{info.FileVersionLS >> 16}.{info.FileVersionLS & 0xFFFF}",
+                    'product_version': f"{info.ProductVersionMS >> 16}.{info.ProductVersionMS & 0xFFFF}.{info.ProductVersionLS >> 16}.{info.ProductVersionLS & 0xFFFF}",
+                    'file_flags': info.FileFlags,
+                    'file_os': info.FileOS,
+                    'file_type': info.FileType,
+                    'file_subtype': info.FileSubtype,
+                }
+
+        return cert_info
+    except Exception as e:
+        logging.error(f"Error analyzing certificates: {e}")
+        return {}
+
+def analyze_delay_imports(pe) -> List[Dict[str, Any]]:
+    """Analyze delay-load imports with error handling for missing attributes."""
+    try:
+        delay_imports = []
+        if hasattr(pe, 'DIRECTORY_ENTRY_DELAY_IMPORT'):
+            for entry in pe.DIRECTORY_ENTRY_DELAY_IMPORT:
+                imports = []
+                for imp in entry.imports:
+                    import_info = {
+                        'name': imp.name.decode() if imp.name else None,
+                        'address': imp.address,
+                        'ordinal': imp.ordinal,
+                    }
+                    imports.append(import_info)
+
+                delay_import = {
+                    'dll': entry.dll.decode() if entry.dll else None,
+                    'attributes': getattr(entry.struct, 'Attributes', None),
+                    'name': getattr(entry.struct, 'Name', None),
+                    'handle': getattr(entry.struct, 'Handle', None),
+                    'iat': getattr(entry.struct, 'IAT', None),
+                    'bound_iat': getattr(entry.struct, 'BoundIAT', None),
+                    'unload_iat': getattr(entry.struct, 'UnloadIAT', None),
+                    'timestamp': getattr(entry.struct, 'TimeDateStamp', None),
+                    'imports': imports
+                }
+                delay_imports.append(delay_import)
+
+        return delay_imports
+    except Exception as e:
+        logging.error(f"Error analyzing delay imports: {e}")
+        return []
+
+def analyze_load_config(pe) -> Dict[str, Any]:
+    """Analyze load configuration."""
+    try:
+        load_config = {}
+        if hasattr(pe, 'DIRECTORY_ENTRY_LOAD_CONFIG'):
+            config = pe.DIRECTORY_ENTRY_LOAD_CONFIG.struct
+            load_config = {
+                'size': config.Size,
+                'timestamp': config.TimeDateStamp,
+                'major_version': config.MajorVersion,
+                'minor_version': config.MinorVersion,
+                'global_flags_clear': config.GlobalFlagsClear,
+                'global_flags_set': config.GlobalFlagsSet,
+                'critical_section_default_timeout': config.CriticalSectionDefaultTimeout,
+                'decommit_free_block_threshold': config.DeCommitFreeBlockThreshold,
+                'decommit_total_free_threshold': config.DeCommitTotalFreeThreshold,
+                'security_cookie': getattr(config, 'SecurityCookie', None), # Use getattr for safety
+                'se_handler_table': getattr(config, 'SEHandlerTable', None),
+                'se_handler_count': getattr(config, 'SEHandlerCount', None)
+            }
+
+        return load_config
+    except Exception as e:
+        logging.error(f"Error analyzing load config: {e}")
+        return {}
+
+def analyze_relocations(pe) -> List[Dict[str, Any]]:
+    """Analyze base relocations with summarized entries."""
+    try:
+        relocations = []
+        if hasattr(pe, 'DIRECTORY_ENTRY_BASERELOC'):
+            for base_reloc in pe.DIRECTORY_ENTRY_BASERELOC:
+                entry_types = {}
+                offsets = []
+
+                for entry in base_reloc.entries:
+                    entry_types[entry.type] = entry_types.get(entry.type, 0) + 1
+                    offsets.append(entry.rva - base_reloc.struct.VirtualAddress)
+
+                reloc_info = {
+                    'virtual_address': base_reloc.struct.VirtualAddress,
+                    'size_of_block': base_reloc.struct.SizeOfBlock,
+                    'summary': {
+                        'total_entries': len(base_reloc.entries),
+                        'types': entry_types,
+                        'offset_range': (min(offsets), max(offsets)) if offsets else None
+                    }
+                }
+
+                relocations.append(reloc_info)
+
+        return relocations
+    except Exception as e:
+        logging.error(f"Error analyzing relocations: {e}")
+        return []
+
+def analyze_overlay(pe, file_path: str) -> Dict[str, Any]:
+    """Analyze file overlay (data appended after the PE structure)."""
+    try:
+        overlay_info = {
+            'exists': False,
+            'offset': 0,
+            'size': 0,
+            'entropy': 0.0
+        }
+
+        # Use pefile's recommended method for overlay
+        end_of_pe = pe.get_overlay_data_start_offset()
+        if end_of_pe is None:
+            return overlay_info # No overlay
+
+        file_size = os.path.getsize(file_path)
+
+        if file_size > end_of_pe:
+            with open(file_path, 'rb') as f:
+                f.seek(end_of_pe)
+                overlay_data = f.read()
+
+                overlay_info['exists'] = True
+                overlay_info['offset'] = end_of_pe
+                overlay_info['size'] = len(overlay_data)
+                overlay_info['entropy'] = calculate_entropy(list(overlay_data))
+
+        return overlay_info
+    except Exception as e:
+        logging.error(f"Error analyzing overlay: {e}")
+        return {}
+
+def analyze_bound_imports(pe) -> List[Dict[str, Any]]:
+    """Analyze bound imports with robust error handling."""
+    try:
+        bound_imports = []
+        if hasattr(pe, 'DIRECTORY_ENTRY_BOUND_IMPORT'):
+            for bound_imp in pe.DIRECTORY_ENTRY_BOUND_IMPORT:
+                bound_import = {
+                    'name': bound_imp.name.decode() if bound_imp.name else None,
+                    'timestamp': bound_imp.struct.TimeDateStamp,
+                    'references': []
+                }
+
+                # Check if `references` exists
+                if hasattr(bound_imp, 'references') and bound_imp.references:
+                    for ref in bound_imp.references:
+                        reference = {
+                            'name': ref.name.decode() if ref.name else None,
+                            'timestamp': getattr(ref.struct, 'TimeDateStamp', None)
+                        }
+                        bound_import['references'].append(reference)
+                else:
+                    logging.info(f"Bound import {bound_import['name']} has no references.")
+
+                bound_imports.append(bound_import)
+
+        return bound_imports
+    except Exception as e:
+        logging.error(f"Error analyzing bound imports: {e}")
+        return []
+
+def analyze_section_characteristics(pe) -> Dict[str, Dict[str, Any]]:
+    """Analyze detailed section characteristics."""
+    try:
+        characteristics = {}
+        for section in pe.sections:
+            section_name = section.Name.decode(errors='ignore').strip('\x00')
+            flags = section.Characteristics
+
+            # Decode section characteristics flags
+            section_flags = {
+                'CODE': bool(flags & 0x20),
+                'INITIALIZED_DATA': bool(flags & 0x40),
+                'UNINITIALIZED_DATA': bool(flags & 0x80),
+                'MEM_DISCARDABLE': bool(flags & 0x2000000),
+                'MEM_NOT_CACHED': bool(flags & 0x4000000),
+                'MEM_NOT_PAGED': bool(flags & 0x8000000),
+                'MEM_SHARED': bool(flags & 0x10000000),
+                'MEM_EXECUTE': bool(flags & 0x20000000),
+                'MEM_READ': bool(flags & 0x40000000),
+                'MEM_WRITE': bool(flags & 0x80000000)
+            }
+
+            characteristics[section_name] = {
+                'flags': section_flags,
+                'entropy': calculate_entropy(list(section.get_data())),
+                'size_ratio': section.SizeOfRawData / pe.OPTIONAL_HEADER.SizeOfImage if pe.OPTIONAL_HEADER.SizeOfImage else 0,
+                'pointer_to_raw_data': section.PointerToRawData,
+                'pointer_to_relocations': section.PointerToRelocations,
+                'pointer_to_line_numbers': section.PointerToLinenumbers,
+                'number_of_relocations': section.NumberOfRelocations,
+                'number_of_line_numbers': section.NumberOfLinenumbers,
+            }
+
+        return characteristics
+    except Exception as e:
+        logging.error(f"Error analyzing section characteristics: {e}")
+        return {}
+
+def analyze_extended_headers(pe) -> Dict[str, Any]:
+    """Analyze extended header information."""
+    try:
+        headers = {
+            'dos_header': {
+                'e_magic': pe.DOS_HEADER.e_magic,
+                'e_cblp': pe.DOS_HEADER.e_cblp,
+                'e_cp': pe.DOS_HEADER.e_cp,
+                'e_crlc': pe.DOS_HEADER.e_crlc,
+                'e_cparhdr': pe.DOS_HEADER.e_cparhdr,
+                'e_minalloc': pe.DOS_HEADER.e_minalloc,
+                'e_maxalloc': pe.DOS_HEADER.e_maxalloc,
+                'e_ss': pe.DOS_HEADER.e_ss,
+                'e_sp': pe.DOS_HEADER.e_sp,
+                'e_csum': pe.DOS_HEADER.e_csum,
+                'e_ip': pe.DOS_HEADER.e_ip,
+                'e_cs': pe.DOS_HEADER.e_cs,
+                'e_lfarlc': pe.DOS_HEADER.e_lfarlc,
+                'e_ovno': pe.DOS_HEADER.e_ovno,
+                'e_oemid': pe.DOS_HEADER.e_oemid,
+                'e_oeminfo': pe.DOS_HEADER.e_oeminfo
+            },
+            'nt_headers': {}
+        }
+
+        # Ensure NT_HEADERS exists and contains FileHeader
+        if hasattr(pe, 'NT_HEADERS') and pe.NT_HEADERS is not None:
+            nt_headers = pe.NT_HEADERS
+            if hasattr(nt_headers, 'FileHeader'):
+                headers['nt_headers'] = {
+                    'signature': nt_headers.Signature,
+                    'machine': nt_headers.FileHeader.Machine,
+                    'number_of_sections': nt_headers.FileHeader.NumberOfSections,
+                    'time_date_stamp': nt_headers.FileHeader.TimeDateStamp,
+                    'characteristics': nt_headers.FileHeader.Characteristics
+                }
+
+        return headers
+    except Exception as e:
+        logging.error(f"Error analyzing extended headers: {e}")
+        return {}
+
+def serialize_data(data) -> Any:
+    """Serialize data for output, ensuring compatibility."""
+    try:
+        return list(data) if data else None
     except Exception:
-        return False
+        return None
+
+def analyze_rich_header(pe) -> Dict[str, Any]:
+    """Analyze Rich header details."""
+    try:
+        rich_header = {}
+        if hasattr(pe, 'RICH_HEADER') and pe.RICH_HEADER is not None:
+            rich_header['checksum'] = getattr(pe.RICH_HEADER, 'checksum', None)
+            rich_header['values'] = serialize_data(pe.RICH_HEADER.values)
+            rich_header['clear_data'] = serialize_data(pe.RICH_HEADER.clear_data)
+            rich_header['key'] = serialize_data(pe.RICH_HEADER.key)
+            rich_header['raw_data'] = serialize_data(pe.RICH_HEADER.raw_data)
+
+            # Decode CompID and build number information
+            compid_info = []
+            for i in range(0, len(pe.RICH_HEADER.values), 2):
+                if i + 1 < len(pe.RICH_HEADER.values):
+                    comp_id = pe.RICH_HEADER.values[i] >> 16
+                    build_number = pe.RICH_HEADER.values[i] & 0xFFFF
+                    count = pe.RICH_HEADER.values[i + 1]
+                    compid_info.append({
+                        'comp_id': comp_id,
+                        'build_number': build_number,
+                        'count': count
+                    })
+            rich_header['comp_id_info'] = compid_info
+
+        return rich_header
+    except Exception as e:
+        logging.error(f"Error analyzing Rich header: {e}")
+        return {}
 
 def extract_numeric_features(file_path: str, rank: Optional[int] = None) -> Optional[Dict[str, Any]]:
-    with perf_monitor.timer("pe_feature_extraction"):
-        if not _have_pefile:
-            logging.debug("pefile not available; skipping PE extraction.")
-            return None
-        if not is_pe_file_quick(file_path):
-            return None
-        try:
-            pe = pefile.PE(file_path, fast_load=True)
-            numeric_features = {
-                'SizeOfOptionalHeader': pe.FILE_HEADER.SizeOfOptionalHeader,
-                'MajorLinkerVersion': pe.OPTIONAL_HEADER.MajorLinkerVersion,
-                'MinorLinkerVersion': pe.OPTIONAL_HEADER.MinorLinkerVersion,
-                'SizeOfCode': pe.OPTIONAL_HEADER.SizeOfCode,
-                'ImageBase': pe.OPTIONAL_HEADER.ImageBase,
-                'SizeOfImage': pe.OPTIONAL_HEADER.SizeOfImage,
-            }
-            pe.close()
-            return numeric_features
-        except Exception as e:
-            logging.debug(f"PE extraction failed: {e}")
-            return None
+    """
+    Extract numeric features of a file using pefile.
+    """
+    try:
+        # Load the PE file
+        pe = pefile.PE(file_path, fast_load=True)
+
+        # Extract features
+        numeric_features = {
+            # Optional Header Features
+            'SizeOfOptionalHeader': pe.FILE_HEADER.SizeOfOptionalHeader,
+            'MajorLinkerVersion': pe.OPTIONAL_HEADER.MajorLinkerVersion,
+            'MinorLinkerVersion': pe.OPTIONAL_HEADER.MinorLinkerVersion,
+            'SizeOfCode': pe.OPTIONAL_HEADER.SizeOfCode,
+            'SizeOfInitializedData': pe.OPTIONAL_HEADER.SizeOfInitializedData,
+            'SizeOfUninitializedData': pe.OPTIONAL_HEADER.SizeOfUninitializedData,
+            'AddressOfEntryPoint': pe.OPTIONAL_HEADER.AddressOfEntryPoint,
+            'BaseOfCode': pe.OPTIONAL_HEADER.BaseOfCode,
+            'BaseOfData': getattr(pe.OPTIONAL_HEADER, 'BaseOfData', 0),
+            'ImageBase': pe.OPTIONAL_HEADER.ImageBase,
+            'SectionAlignment': pe.OPTIONAL_HEADER.SectionAlignment,
+            'FileAlignment': pe.OPTIONAL_HEADER.FileAlignment,
+            'MajorOperatingSystemVersion': pe.OPTIONAL_HEADER.MajorOperatingSystemVersion,
+            'MinorOperatingSystemVersion': pe.OPTIONAL_HEADER.MinorOperatingSystemVersion,
+            'MajorImageVersion': pe.OPTIONAL_HEADER.MajorImageVersion,
+            'MinorImageVersion': pe.OPTIONAL_HEADER.MinorImageVersion,
+            'MajorSubsystemVersion': pe.OPTIONAL_HEADER.MajorSubsystemVersion,
+            'MinorSubsystemVersion': pe.OPTIONAL_HEADER.MinorSubsystemVersion,
+            'SizeOfImage': pe.OPTIONAL_HEADER.SizeOfImage,
+            'SizeOfHeaders': pe.OPTIONAL_HEADER.SizeOfHeaders,
+            'CheckSum': pe.OPTIONAL_HEADER.CheckSum,
+            'Subsystem': pe.OPTIONAL_HEADER.Subsystem,
+            'DllCharacteristics': pe.OPTIONAL_HEADER.DllCharacteristics,
+            'SizeOfStackReserve': pe.OPTIONAL_HEADER.SizeOfStackReserve,
+            'SizeOfStackCommit': pe.OPTIONAL_HEADER.SizeOfStackCommit,
+            'SizeOfHeapReserve': pe.OPTIONAL_HEADER.SizeOfHeapReserve,
+            'SizeOfHeapCommit': pe.OPTIONAL_HEADER.SizeOfHeapCommit,
+            'LoaderFlags': pe.OPTIONAL_HEADER.LoaderFlags,
+            'NumberOfRvaAndSizes': pe.OPTIONAL_HEADER.NumberOfRvaAndSizes,
+
+            # Section Headers
+            'sections': [
+                {
+                    'name': section.Name.decode(errors='ignore').strip('\x00'),
+                    'virtual_size': section.Misc_VirtualSize,
+                    'virtual_address': section.VirtualAddress,
+                    'size_of_raw_data': section.SizeOfRawData,
+                    'pointer_to_raw_data': section.PointerToRawData,
+                    'characteristics': section.Characteristics,
+                }
+                for section in pe.sections
+            ],
+
+            # Imported Functions
+            'imports': [
+                imp.name.decode(errors='ignore') if imp.name else "Unknown"
+                for entry in getattr(pe, 'DIRECTORY_ENTRY_IMPORT', [])
+                for imp in getattr(entry, 'imports', [])
+            ] if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT') else [],
+
+            # Exported Functions
+            'exports': [
+                exp.name.decode(errors='ignore') if exp.name else "Unknown"
+                for exp in getattr(getattr(pe, 'DIRECTORY_ENTRY_EXPORT', None), 'symbols', [])
+            ] if hasattr(pe, 'DIRECTORY_ENTRY_EXPORT') else [],
+
+            # Resources
+            'resources': [
+                {
+                    'type_id': getattr(getattr(resource_type, 'struct', None), 'Id', None),
+                    'resource_id': getattr(getattr(resource_id, 'struct', None), 'Id', None),
+                    'lang_id': getattr(getattr(resource_lang, 'struct', None), 'Id', None),
+                    'size': getattr(getattr(resource_lang, 'data', None), 'Size', None),
+                    'codepage': getattr(getattr(resource_lang, 'data', None), 'CodePage', None),
+                }
+                for resource_type in
+                (pe.DIRECTORY_ENTRY_RESOURCE.entries if hasattr(pe, 'DIRECTORY_ENTRY_RESOURCE') and hasattr(pe.DIRECTORY_ENTRY_RESOURCE, 'entries') else [])
+                for resource_id in (resource_type.directory.entries if hasattr(resource_type, 'directory') else [])
+                for resource_lang in (resource_id.directory.entries if hasattr(resource_id, 'directory') else [])
+                if hasattr(resource_lang, 'data')
+            ] if hasattr(pe, 'DIRECTORY_ENTRY_RESOURCE') else [],
+
+            # Certificates
+            'certificates': analyze_certificates(pe),  # Analyze certificates
+
+            # DOS Stub Analysis
+            'dos_stub': analyze_dos_stub(pe),  # DOS stub analysis here
+
+            # TLS Callbacks
+            'tls_callbacks': analyze_tls_callbacks(pe),  # TLS callback analysis here
+
+            # Delay Imports
+            'delay_imports': analyze_delay_imports(pe),  # Delay imports analysis here
+
+            # Load Config
+            'load_config': analyze_load_config(pe),  # Load config analysis here
+
+            # Relocations
+            'relocations': analyze_relocations(pe),  # Relocations analysis here
+
+            # Bound Imports
+            'bound_imports': analyze_bound_imports(pe),  # Bound imports analysis here
+
+            # Section Characteristics
+            'section_characteristics': analyze_section_characteristics(pe),  # Section characteristics analysis here
+
+            # Extended Headers
+            'extended_headers': analyze_extended_headers(pe),  # Extended headers analysis here
+
+            # Rich Header
+            'rich_header': analyze_rich_header(pe),  # Rich header analysis here
+
+            # Overlay
+            'overlay': analyze_overlay(pe, file_path),  # Overlay analysis here
+        }
+        pe.close()
+        # Add numeric tag if provided
+        if rank is not None:
+            numeric_features['numeric_tag'] = rank
+
+        return numeric_features
+
+    except pefile.PEFormatError:
+        logging.error(f"File is not a valid PE format: {file_path}")
+        return None
+    except Exception as ex:
+        logging.error(f"Error extracting numeric features from {file_path}: {str(ex)}", exc_info=True)
+        return None
 
 def calculate_vector_similarity(vec1: List[float], vec2: List[float]) -> float:
-    import numpy as _np
+    """Calculates similarity between two numeric vectors using cosine similarity."""
     if not vec1 or not vec2 or len(vec1) != len(vec2):
         return 0.0
-    a = _np.array(vec1, dtype=_np.float64)
-    b = _np.array(vec2, dtype=_np.float64)
-    dot = _np.dot(a, b)
-    na = _np.linalg.norm(a)
-    nb = _np.linalg.norm(b)
-    if na == 0 or nb == 0:
-        return 1.0 if na == nb else 0.0
-    cos = dot / (na * nb)
-    return (cos + 1) / 2
+
+    # Convert to numpy arrays for vector operations
+    vec1 = np.array(vec1, dtype=np.float64)
+    vec2 = np.array(vec2, dtype=np.float64)
+
+    # Calculate cosine similarity
+    dot_product = np.dot(vec1, vec2)
+    norm_vec1 = np.linalg.norm(vec1)
+    norm_vec2 = np.linalg.norm(vec2)
+
+    if norm_vec1 == 0 or norm_vec2 == 0:
+        return 1.0 if norm_vec1 == norm_vec2 else 0.0
+
+    # The result of dot_product / (norm_vec1 * norm_vec2) is between -1 and 1.
+    # We scale it to be in the [0, 1] range for easier interpretation.
+    cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
+    return (cosine_similarity + 1) / 2
+
+# Load ML definitions
 
 def load_ml_definitions(filepath: str) -> bool:
     global malicious_numeric_features, malicious_file_names, benign_numeric_features, benign_file_names
-    with perf_monitor.timer("ml_definitions_load"):
-        if not os.path.exists(filepath):
-            logging.warning("ML definitions not found. ML disabled.")
-            return False
-        try:
-            with open(filepath, 'r', encoding='utf-8-sig') as f:
-                ml_defs = json.load(f)
-            malicious_numeric_features = []
-            malicious_file_names = []
-            for entry in ml_defs.get("malicious", []):
-                numeric = [
-                    float(entry.get("SizeOfOptionalHeader", 0)),
-                    float(entry.get("MajorLinkerVersion", 0)),
-                    float(entry.get("MinorLinkerVersion", 0)),
-                    float(entry.get("SizeOfCode", 0)),
-                    float(entry.get("SizeOfImage", 0))
-                ]
-                malicious_numeric_features.append(numeric)
-                malicious_file_names.append(entry.get("file_info", {}).get("filename", "unknown"))
-            benign_numeric_features = []
-            benign_file_names = []
-            for entry in ml_defs.get("benign", []):
-                numeric = [
-                    float(entry.get("SizeOfOptionalHeader", 0)),
-                    float(entry.get("MajorLinkerVersion", 0)),
-                    float(entry.get("MinorLinkerVersion", 0)),
-                    float(entry.get("SizeOfCode", 0)),
-                    float(entry.get("SizeOfImage", 0))
-                ]
-                benign_numeric_features.append(numeric)
-                benign_file_names.append(entry.get("file_info", {}).get("filename", "unknown"))
-            logging.info(f"Loaded ML DB: {len(malicious_numeric_features)} malicious / {len(benign_numeric_features)} benign")
-            return True
-        except Exception as e:
-            logging.error(f"Failed to load ML definitions: {e}")
-            return False
 
-def scan_file_with_machine_learning_ai(file_path: str, threshold: float = 0.86):
-    with perf_monitor.timer("ml_scan_total"):
-        if not malicious_numeric_features and not benign_numeric_features:
-            return False, "ML_DB_Not_Loaded", 0.0
-        raw = extract_numeric_features(file_path)
-        if not raw:
-            return False, "Not-PE-File", 0.0
-        vec = [
-            float(raw.get("SizeOfOptionalHeader", 0)),
-            float(raw.get("MajorLinkerVersion", 0)),
-            float(raw.get("MinorLinkerVersion", 0)),
-            float(raw.get("SizeOfCode", 0)),
-            float(raw.get("SizeOfImage", 0)),
-        ]
-        best_sim = 0.0
-        best_name = "Unknown"
-        for mvec, name in zip(malicious_numeric_features, malicious_file_names):
-            sim = calculate_vector_similarity(vec, mvec)
-            if sim > best_sim:
-                best_sim = sim
-                best_name = name
-        if best_sim >= threshold:
-            return True, best_name, best_sim
-        best_benign = 0.0
-        for bvec in benign_numeric_features:
-            sim = calculate_vector_similarity(vec, bvec)
-            if sim > best_benign:
-                best_benign = sim
-        if best_benign > 0.93:
-            return False, "Benign", best_benign
-        return False, "Unknown", best_sim
+    if not os.path.exists(filepath):
+        logging.error(f"Machine learning definitions file not found: {filepath}. ML scanning will be disabled.")
+        return False
+
+    try:
+        with open(filepath, 'r', encoding='utf-8-sig') as results_file:
+            ml_defs = json.load(results_file)
+
+        # Malicious section
+        malicious_entries = ml_defs.get("malicious", [])
+        malicious_numeric_features = []
+        malicious_file_names = []
+        for entry in malicious_entries:
+            numeric = [
+                float(entry.get("SizeOfOptionalHeader", 0)),
+                float(entry.get("MajorLinkerVersion", 0)),
+                float(entry.get("MinorLinkerVersion", 0)),
+                float(entry.get("SizeOfCode", 0)),
+                float(entry.get("SizeOfInitializedData", 0)),
+                float(entry.get("SizeOfUninitializedData", 0)),
+                float(entry.get("AddressOfEntryPoint", 0)),
+                float(entry.get("ImageBase", 0)),
+                float(entry.get("Subsystem", 0)),
+                float(entry.get("DllCharacteristics", 0)),
+                float(entry.get("SizeOfStackReserve", 0)),
+                float(entry.get("SizeOfHeapReserve", 0)),
+                float(entry.get("CheckSum", 0)),
+                float(entry.get("NumberOfRvaAndSizes", 0)),
+                float(entry.get("SizeOfImage", 0)),
+                float(len(entry.get("imports", []))),
+                float(len(entry.get("exports", []))),
+                float(len(entry.get("resources", []))),
+                float(int(entry.get("overlay", {}).get("exists", False))),
+            ]
+            malicious_numeric_features.append(numeric)
+            filename = entry.get("file_info", {}).get("filename", "unknown")
+            malicious_file_names.append(filename)
+
+        # Benign section
+        benign_entries = ml_defs.get("benign", [])
+        benign_numeric_features = []
+        benign_file_names = []
+        for entry in benign_entries:
+            numeric = [
+                float(entry.get("SizeOfOptionalHeader", 0)),
+                float(entry.get("MajorLinkerVersion", 0)),
+                float(entry.get("MinorLinkerVersion", 0)),
+                float(entry.get("SizeOfCode", 0)),
+                float(entry.get("SizeOfInitializedData", 0)),
+                float(entry.get("SizeOfUninitializedData", 0)),
+                float(entry.get("AddressOfEntryPoint", 0)),
+                float(entry.get("ImageBase", 0)),
+                float(entry.get("Subsystem", 0)),
+                float(entry.get("DllCharacteristics", 0)),
+                float(entry.get("SizeOfStackReserve", 0)),
+                float(entry.get("SizeOfHeapReserve", 0)),
+                float(entry.get("CheckSum", 0)),
+                float(entry.get("NumberOfRvaAndSizes", 0)),
+                float(entry.get("SizeOfImage", 0)),
+                float(len(entry.get("imports", []))),
+                float(len(entry.get("exports", []))),
+                float(len(entry.get("resources", []))),
+                float(int(entry.get("overlay", {}).get("exists", False))),
+            ]
+            benign_numeric_features.append(numeric)
+            filename = entry.get("file_info", {}).get("filename", "unknown")
+            benign_file_names.append(filename)
+
+        logging.info(f"[!] Loaded {len(malicious_numeric_features)} malicious and {len(benign_numeric_features)} benign ML definitions.")
+        return True
+
+    except (json.JSONDecodeError, IOError) as e:
+        logging.error(f"Failed to load or parse ML definitions from {filepath}: {e}. ML scanning will be disabled.")
+        return False
+
+def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
+    """Scan a file for malicious activity using machine learning definitions loaded from JSON."""
+    malware_definition = "Unknown"
+    logging.info(f"Starting machine learning scan for file: {file_path}")
+
+    try:
+        pe = pefile.PE(file_path)
+        pe.close()
+    except pefile.PEFormatError:
+        logging.error(f"File {file_path} is not a valid PE file. Returning default value 'Unknown'.")
+        return False, malware_definition, 0
+
+    logging.info(f"File {file_path} is a valid PE file, proceeding with feature extraction.")
+
+    file_numeric_features = extract_numeric_features(file_path)
+    if not file_numeric_features:
+        return False, "Feature-Extraction-Failed", 0
+
+    is_malicious_ml = False
+    nearest_malicious_similarity = 0
+    nearest_benign_similarity = 0
+
+    # Check malicious definitions
+    for ml_feats, info in zip(malicious_numeric_features, malicious_file_names):
+        similarity = calculate_vector_similarity(file_numeric_features, ml_feats)
+        nearest_malicious_similarity = max(nearest_malicious_similarity, similarity)
+
+        if similarity >= threshold:
+            is_malicious_ml = True
+
+            # Handle both string and dict cases
+            if isinstance(info, dict):
+                malware_definition = info.get('file_name', 'Unknown')
+                rank = info.get('numeric_tag', 'N/A')
+            elif isinstance(info, str):
+                malware_definition = info
+                rank = 'N/A'
+            else:
+                malware_definition = str(info)
+                rank = 'N/A'
+
+            logging.critical(f"Malicious activity detected in {file_path}. Definition: {malware_definition}, similarity: {similarity}, rank: {rank}")
+
+    # If not malicious, check benign
+    if not is_malicious_ml:
+        for ml_feats, info in zip(benign_numeric_features, benign_file_names):
+            similarity = calculate_vector_similarity(file_numeric_features, ml_feats)
+            nearest_benign_similarity = max(nearest_benign_similarity, similarity)
+
+            # Handle both string and dict cases
+            if isinstance(info, dict):
+                benign_definition = info.get('file_name', 'Unknown')
+            elif isinstance(info, str):
+                benign_definition = info
+            else:
+                benign_definition = str(info)
+
+        if nearest_benign_similarity >= 0.93:
+            malware_definition = "Benign"
+            logging.info(f"File {file_path} is classified as benign ({benign_definition}) with similarity: {nearest_benign_similarity}")
+        else:
+            malware_definition = "Unknown"
+            logging.info(f"File {file_path} is classified as unknown with similarity: {nearest_benign_similarity}")
+
+    # Return result
+    if is_malicious_ml:
+        return True, malware_definition, nearest_malicious_similarity
+    else:
+        return False, malware_definition, nearest_benign_similarity
 
 # ---------------- Result logging ----------------
 def log_scan_result(md5: str, result: Dict[str, Any], from_cache: bool = False):
