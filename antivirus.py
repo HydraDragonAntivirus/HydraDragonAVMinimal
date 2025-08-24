@@ -20,6 +20,7 @@ import threading
 from typing import List, Dict, Any, Optional, Set
 import argparse
 import inspect
+import copy
 import numpy as np
 
 # Add ClamAV subfolder to Python path
@@ -1300,8 +1301,36 @@ def save_scan_cache(filepath: str, cache: Dict[str, Any]):
         except Exception as e:
             logging.error(f"Could not save cache file: {e}")
 
-# ---------------- Per-file processing ----------------
+# --- helper: cacheable form (remove clamav_result before caching) ---
+def _make_cacheable_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Return a deep-copied version of result suitable for caching:
+    - Remove 'clamav_result'
+    - Ensure 'yara_matches' and 'ml_result' exist
+    - Mark it as cached without ClamAV
+    """
+    r = copy.deepcopy(result)
+    
+    # Remove ClamAV result safely
+    r.pop('clamav_result', None)
+    
+    # Ensure YARA and ML keys exist
+    r.setdefault('yara_matches', [])
+    r.setdefault('ml_result', {'is_malicious': False, 'definition': '', 'similarity': 0.0})
+    
+    # Mark as cached without ClamAV
+    r['_cached_without_clamav'] = True
+    
+    return r
+
+# ---------------- Per-file processing (REPLACE existing process_file) ----------------
 def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None):
+    """
+    Process a single file.
+    - ClamAV results are never cached.
+    - On cache hit: use cached YARA+ML but always re-run ClamAV.
+    - ML scan applies 0.93 benign score threshold.
+    """
     global malicious_file_count, benign_file_count
     start_total = time.perf_counter()
     timings: Dict[str, float] = {}
@@ -1310,7 +1339,7 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None)
         logging.warning(f"File not found: {file_to_scan}")
         return
 
-    # stat-check
+    # --- File stat ---
     t0 = time.perf_counter()
     try:
         st = os.stat(file_to_scan)
@@ -1319,29 +1348,44 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None)
         stat_key = None
     timings['stat_check'] = time.perf_counter() - t0
 
-    # load cache (now with auto-invalidation)
+    # --- Load cache ---
     t0 = time.perf_counter()
     cache = load_scan_cache(SCAN_CACHE_FILE)
     timings['cache_load'] = time.perf_counter() - t0
 
-    # Skip cache lookups that might contain old buggy results
-    # The new load_scan_cache will return empty cache if code changed
-
-    # md5
+    # --- MD5 ---
     t0 = time.perf_counter()
     md5_hash = calculate_md5(file_to_scan)
     timings['md5_calculation'] = time.perf_counter() - t0
     if not md5_hash:
         return
 
-    # Check MD5 cache only if it's not a system key
+    # --- CACHE HIT ---
     if md5_hash in cache and not md5_hash.startswith('_'):
-        cached_result = cache[md5_hash]
-        cached_result['timings'] = {'cache_hit': 0.0001}
-        log_scan_result(md5_hash, cached_result, from_cache=True)
-        is_threat = (cached_result.get('clamav_result', {}).get('status') == 'threat_found' or
-                     len(cached_result.get('yara_matches', [])) > 0 or
-                     cached_result.get('ml_result', {}).get('is_malicious'))
+        cached = cache[md5_hash]
+        cached_timings = dict(cached.get('timings', {}))
+        cached_timings.update({'cache_hit': 0.0001})
+
+        # Always rerun ClamAV
+        t0 = time.perf_counter()
+        try:
+            clamav_res = scan_file_with_clamav(file_to_scan)
+        except Exception as e:
+            clamav_res = {'status': 'error', 'details': f'ClamAV error on cache-hit rescan: {e}'}
+        cached_timings['clamav_scan_on_cache_hit'] = time.perf_counter() - t0
+
+        merged = copy.deepcopy(cached)
+        merged['clamav_result'] = clamav_res
+        merged['timings'] = cached_timings
+        merged['_stat'] = stat_key
+
+        log_scan_result(md5_hash, merged, from_cache=True)
+
+        is_threat = (
+            (clamav_res.get('status') == 'threat_found') or
+            (len(cached.get('yara_matches', [])) > 0) or
+            (cached.get('ml_result', {}).get('is_malicious') is True)
+        )
         with file_counter_lock:
             if is_threat:
                 malicious_file_count += 1
@@ -1349,7 +1393,7 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None)
                 benign_file_count += 1
         return
 
-    # size
+    # --- File size check ---
     t0 = time.perf_counter()
     size = os.path.getsize(file_to_scan)
     timings['file_size_check'] = time.perf_counter() - t0
@@ -1367,16 +1411,16 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None)
         with file_counter_lock:
             benign_file_count += 1
         log_scan_result(md5_hash, result)
-        cache[md5_hash] = result
+        cache[md5_hash] = _make_cacheable_result(result)
         save_scan_cache(SCAN_CACHE_FILE, cache)
         return
 
-    # file type heuristics
+    # --- File type detection ---
     t0 = time.perf_counter()
     file_type = check_file_type_with_die(file_to_scan)
     timings['file_type_detection'] = time.perf_counter() - t0
 
-    # ClamAV scan (IN-PROC ONLY, NO TIMEOUT)
+    # --- ClamAV scan ---
     t0 = time.perf_counter()
     clamav_res = scan_file_with_clamav(file_to_scan)
     timings['clamav_scan'] = time.perf_counter() - t0
@@ -1394,11 +1438,9 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None)
         with file_counter_lock:
             malicious_file_count += 1
         log_scan_result(md5_hash, result)
-        cache[md5_hash] = result
-        save_scan_cache(SCAN_CACHE_FILE, cache)
         return
 
-    # YARA
+    # --- YARA scan ---
     t0 = time.perf_counter()
     yara_res = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
     timings['yara_scan'] = time.perf_counter() - t0
@@ -1416,34 +1458,29 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None)
         with file_counter_lock:
             malicious_file_count += 1
         log_scan_result(md5_hash, result)
-        cache[md5_hash] = result
+        cache[md5_hash] = _make_cacheable_result(result)
         save_scan_cache(SCAN_CACHE_FILE, cache)
         return
 
-    # ML
+    # --- ML scan with 0.93 threshold ---
     t0 = time.perf_counter()
     is_malicious, definition, sim = scan_file_with_machine_learning_ai(file_to_scan)
     timings['ml_scan'] = time.perf_counter() - t0
-    ml_result = {'is_malicious': is_malicious, 'definition': definition, 'similarity': sim}
 
-    if is_malicious:
-        result = {
-            'status': 'scanned',
-            'file_type': file_type,
-            'clamav_result': clamav_res,
-            'yara_matches': yara_res,
-            'ml_result': ml_result,
-            'timings': timings,
-            '_stat': stat_key
-        }
+    # If your ML function can return matched rules, do this:
+    matched_rules = getattr(scan_file_with_machine_learning_ai, "last_matched_rules", [])
+
+    if matched_rules:
+        logging.warning(f"ML matched rules for {file_to_scan}: {matched_rules}")
+
+    if is_malicious and sim < 0.93:
+        ml_result = {'is_malicious': True, 'definition': definition, 'similarity': float(sim)}
         with file_counter_lock:
             malicious_file_count += 1
-        log_scan_result(md5_hash, result)
-        cache[md5_hash] = result
-        save_scan_cache(SCAN_CACHE_FILE, cache)
-        return
+    else:
+        ml_result = {'is_malicious': False, 'definition': definition, 'similarity': float(sim)}
 
-    # clean
+    # --- Final result ---
     result = {
         'status': 'scanned',
         'file_type': file_type,
@@ -1453,10 +1490,15 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None)
         'timings': timings,
         '_stat': stat_key
     }
+
     with file_counter_lock:
-        benign_file_count += 1
+        if ml_result['is_malicious'] or yara_res or clamav_res.get('status') == 'threat_found':
+            malicious_file_count += 1
+        else:
+            benign_file_count += 1
+
     log_scan_result(md5_hash, result)
-    cache[md5_hash] = result
+    cache[md5_hash] = _make_cacheable_result(result)
     save_scan_cache(SCAN_CACHE_FILE, cache)
 
     total_time = time.perf_counter() - start_total
