@@ -19,6 +19,7 @@ import string
 import threading
 from typing import List, Dict, Any, Optional, Set
 import argparse
+import inspect
 import numpy as np
 
 # Add ClamAV subfolder to Python path
@@ -1252,6 +1253,53 @@ def find_cache_by_stat(cache: Dict[str, Any], stat_key: str) -> Optional[tuple]:
             return k, v
     return None
 
+# Add these helper functions near the top after imports
+def get_code_version_hash():
+    """Generate a hash of critical ML functions to detect code changes."""
+    try:
+        critical_functions = [
+            inspect.getsource(calculate_vector_similarity),
+            inspect.getsource(scan_file_with_machine_learning_ai),
+            inspect.getsource(load_ml_definitions)
+        ]
+        code_content = ''.join(critical_functions)
+        return hashlib.md5(code_content.encode()).hexdigest()[:8]
+    except Exception:
+        return "unknown"
+
+# Replace your existing load_scan_cache function
+def load_scan_cache(filepath: str) -> Dict[str, Any]:
+    with perf_monitor.timer("cache_load"):
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                
+                # Check if this cache was created with the same code version
+                current_code_hash = get_code_version_hash()
+                cache_code_hash = cache_data.get('_code_version', '')
+                
+                if cache_code_hash != current_code_hash:
+                    logging.warning(f"Code version changed (was {cache_code_hash}, now {current_code_hash}). Invalidating cache.")
+                    return {'_code_version': current_code_hash}
+                
+                return cache_data
+            except Exception as e:
+                logging.warning(f"Could not read cache file: {e}")
+        
+        return {'_code_version': get_code_version_hash()}
+
+# Replace your existing save_scan_cache function
+def save_scan_cache(filepath: str, cache: Dict[str, Any]):
+    with perf_monitor.timer("cache_save"):
+        try:
+            # Ensure code version is always saved
+            cache['_code_version'] = get_code_version_hash()
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, indent=4)
+        except Exception as e:
+            logging.error(f"Could not save cache file: {e}")
+
 # ---------------- Per-file processing ----------------
 def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None):
     global malicious_file_count, benign_file_count
@@ -1271,26 +1319,13 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None)
         stat_key = None
     timings['stat_check'] = time.perf_counter() - t0
 
-    # load cache
+    # load cache (now with auto-invalidation)
     t0 = time.perf_counter()
     cache = load_scan_cache(SCAN_CACHE_FILE)
     timings['cache_load'] = time.perf_counter() - t0
 
-    if stat_key:
-        found = find_cache_by_stat(cache, stat_key)
-        if found:
-            md5k, cached_result = found
-            cached_result['timings'] = {'cache_hit': 0.0001}
-            log_scan_result(md5k, cached_result, from_cache=True)
-            is_threat = (cached_result.get('clamav_result', {}).get('status') == 'threat_found' or
-                         len(cached_result.get('yara_matches', [])) > 0 or
-                         cached_result.get('ml_result', {}).get('is_malicious'))
-            with file_counter_lock:
-                if is_threat:
-                    malicious_file_count += 1
-                else:
-                    benign_file_count += 1
-            return
+    # Skip cache lookups that might contain old buggy results
+    # The new load_scan_cache will return empty cache if code changed
 
     # md5
     t0 = time.perf_counter()
@@ -1299,7 +1334,8 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str], scanner=None)
     if not md5_hash:
         return
 
-    if md5_hash in cache:
+    # Check MD5 cache only if it's not a system key
+    if md5_hash in cache and not md5_hash.startswith('_'):
         cached_result = cache[md5_hash]
         cached_result['timings'] = {'cache_hit': 0.0001}
         log_scan_result(md5_hash, cached_result, from_cache=True)
@@ -1439,7 +1475,7 @@ def main():
 
     if args.clear_cache and os.path.exists(SCAN_CACHE_FILE):
         os.remove(SCAN_CACHE_FILE)
-        logging.info("Cache cleared.")
+        logging.info("Cache cleared manually.")
 
     # Initialize 64-bit safe in-process ClamAV
     db_abs = os.path.abspath("ClamAV/database")
