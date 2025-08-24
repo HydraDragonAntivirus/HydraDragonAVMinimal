@@ -1,0 +1,1615 @@
+{
+    "de501c5cf9c1dbdbd377dbc66547fe39": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'cl_scanfile'"
+        },
+        "yara_matches": [
+            {
+                "rule": "MAL_QuasarRAT_May19_1_RID2E1E",
+                "tags": [
+                    "DEMO",
+                    "EXE",
+                    "FILE",
+                    "MAL"
+                ],
+                "meta": {
+                    "description": "Detects QuasarRAT malware",
+                    "author": "Florian Roth",
+                    "reference": "https://blog.ensilo.com/uncovering-new-activity-by-apt10",
+                    "date": "2019-05-27 11:00:51",
+                    "score": 75,
+                    "customer": "demo",
+                    "license": "CC-BY-NC https://creativecommons.org/licenses/by-nc/4.0/",
+                    "modified": "2023-01-06",
+                    "hash1": "0644e561225ab696a97ba9a77583dcaab4c26ef0379078c65f9ade684406eded",
+                    "tags": "DEMO, EXE, FILE, MAL",
+                    "minimum_yara": "1.7"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 4.040000021632295e-05,
+            "cache_load": 0.0007836000004317611,
+            "md5_calculation": 0.006302400001004571,
+            "file_size_check": 0.00020140000015089754,
+            "file_type_detection": 0.0005628999988402938,
+            "clamav_scan": 5.6400000175926834e-05,
+            "yara_scan": 0.06957080000029237
+        },
+        "_stat": "3265536:1753304762000000000"
+    },
+    "dcd9c7ece0e0044fc5b3613a1f5598e7": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'cl_scanfile'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": true,
+            "definition": "Virus.Hooker_Trojan.GenericKD.67881389.vir",
+            "similarity": 0.9999999827714018
+        },
+        "timings": {
+            "stat_check": 3.170000127283856e-05,
+            "cache_load": 0.000247500000114087,
+            "md5_calculation": 0.010823099999470287,
+            "file_size_check": 0.00018769999951473437,
+            "file_type_detection": 0.0003127999989374075,
+            "clamav_scan": 5.430000055639539e-05,
+            "yara_scan": 12.472147899999982,
+            "ml_scan": 0.5786893999993481
+        },
+        "_stat": "6586880:1753304480000000000"
+    },
+    "427f24c5aa80d690d8caaae54be0719c": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'cl_scanfile'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 5.310000051395036e-05,
+            "cache_load": 0.0002781000002869405,
+            "md5_calculation": 0.00042070000017702114,
+            "file_size_check": 3.719999949680641e-05,
+            "file_type_detection": 0.00043340000047464855,
+            "clamav_scan": 5.849999979545828e-05,
+            "yara_scan": 0.17835179999929096,
+            "ml_scan": 0.0002777999998215819
+        },
+        "_stat": "155514:1753304568000000000"
+    },
+    "ac8fb5b3dab75b47ae1bfae56e78e418": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'cl_scanfile'"
+        },
+        "yara_matches": [
+            {
+                "rule": "m26cd_27d8e869c0800b12",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.8 divinorum/0.9992 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=m26cd.27d8e869c0800b12",
+                    "cluster": "m26cd.27d8e869c0800b12",
+                    "cluster_size": "3",
+                    "filetype": "",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20180910",
+                    "license": "RIL-1.0 [Rick's Internet License]",
+                    "family": "linux gafgyt backdoor",
+                    "md5_hashes": "['11679e2225f4db63c855eebf95203a023652a0be','a1852b960f3547531d404f62e3cf8b4287733c80','b34024ac1cf784d833624e44ed9f12e5faa37164']",
+                    "cluster_members": "http://icewater.io/en/cluster/detail?h64=m26cd.27d8e869c0800b12"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 5.729999975301325e-05,
+            "cache_load": 0.0003163999990647426,
+            "md5_calculation": 0.00028529999872262124,
+            "file_size_check": 3.680000008898787e-05,
+            "file_type_detection": 0.00017839999964053277,
+            "clamav_scan": 5.849999979545828e-05,
+            "yara_scan": 0.0033285000008618226
+        },
+        "_stat": "72352:1753304598000000000"
+    },
+    "9bda856d0046efbc3726fdb5c27b206f": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'cl_scanfile'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 2.9899998480686918e-05,
+            "cache_load": 0.0002808999997796491,
+            "md5_calculation": 0.00024590000066382345,
+            "file_size_check": 4.099999932805076e-05,
+            "file_type_detection": 0.00017889999980980065,
+            "clamav_scan": 5.1500001063686796e-05,
+            "yara_scan": 0.07023019999905955,
+            "ml_scan": 0.0003180999992764555
+        },
+        "_stat": "42476:1753304542000000000"
+    },
+    "28f23fd16249b7754378002c3ae838cc": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 3.110000034212135e-05,
+            "cache_load": 0.014696199999889359,
+            "md5_calculation": 0.01851899999928719,
+            "file_size_check": 0.00015390000044135377,
+            "file_type_detection": 0.002668400000402471,
+            "clamav_scan": 0.0007162000001699198,
+            "yara_scan": 5.2168830999999045,
+            "ml_scan": 0.011325999999826308
+        },
+        "_stat": "2874824:1753304586000000000"
+    },
+    "04eaa4d17e233df70c421bcc3ac92024": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [
+            {
+                "rule": "_Nullsoft_PiMP_Stub__SFX_",
+                "tags": [],
+                "meta": {
+                    "description": "Nullsoft PiMP Stub -> SFX"
+                }
+            },
+            {
+                "rule": "Nullsoft_PiMP_Stub_SFX",
+                "tags": [
+                    "PEiD"
+                ],
+                "meta": {}
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.000992999999652966,
+            "cache_load": 0.01089970000066387,
+            "md5_calculation": 0.07445740000002843,
+            "file_size_check": 0.0006211999989318429,
+            "file_type_detection": 0.007904299998699571,
+            "clamav_scan": 0.00016540000069653615,
+            "yara_scan": 2.846570399999109
+        },
+        "_stat": "1432369:1753304738000000000"
+    },
+    "125c5d11b16440e3b46d849b5e23191c": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [
+            {
+                "rule": "m26cd_27d8e869c0800b12",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.8 divinorum/0.9992 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=m26cd.27d8e869c0800b12",
+                    "cluster": "m26cd.27d8e869c0800b12",
+                    "cluster_size": "3",
+                    "filetype": "",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20180910",
+                    "license": "RIL-1.0 [Rick's Internet License]",
+                    "family": "linux gafgyt backdoor",
+                    "md5_hashes": "['11679e2225f4db63c855eebf95203a023652a0be','a1852b960f3547531d404f62e3cf8b4287733c80','b34024ac1cf784d833624e44ed9f12e5faa37164']",
+                    "cluster_members": "http://icewater.io/en/cluster/detail?h64=m26cd.27d8e869c0800b12"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.00010879999899771065,
+            "cache_load": 0.004697700000178884,
+            "md5_calculation": 0.008951099998739664,
+            "file_size_check": 0.00041480000072624534,
+            "file_type_detection": 0.005752299999585375,
+            "clamav_scan": 0.00036360000012791716,
+            "yara_scan": 0.008030700000745128
+        },
+        "_stat": "150484:1753304560000000000"
+    },
+    "b83e0ccbf2df7fac6b86868fb104334e": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.00119510000149603,
+            "cache_load": 0.007207099999504862,
+            "md5_calculation": 0.018309399998543086,
+            "file_size_check": 0.00013889999900129624,
+            "file_type_detection": 0.006107799999881536,
+            "clamav_scan": 0.00042240000038873404,
+            "yara_scan": 1.3561131000005844,
+            "ml_scan": 0.004660900000089896
+        },
+        "_stat": "681668:1753304532000000000"
+    },
+    "747608ddbc73547bb921bb81e404db9a": {
+        "status": "scanned",
+        "file_type": "Binary\nFormat: plain text",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.003918200000043726,
+            "cache_load": 0.009418300000106683,
+            "md5_calculation": 0.002588500001365901,
+            "file_size_check": 0.0007913999997981591,
+            "file_type_detection": 0.007343600000240258,
+            "clamav_scan": 7.870000081311446e-05,
+            "yara_scan": 0.031014899999718182,
+            "ml_scan": 0.00883090000024822
+        },
+        "_stat": "164:1753304534000000000"
+    },
+    "773aeada25417430e2009831b5f4ee8b": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.00039759999890520703,
+            "cache_load": 0.002299499999935506,
+            "md5_calculation": 0.04279830000086804,
+            "file_size_check": 0.0006921000003785593,
+            "file_type_detection": 0.004502800000409479,
+            "clamav_scan": 0.0001584999990882352,
+            "yara_scan": 2.965160499999911,
+            "ml_scan": 0.0003077000001212582
+        },
+        "_stat": "1380332:1753304640000000000"
+    },
+    "2b7645356ed05ab02e7d71e2ac0625e1": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [
+            {
+                "rule": "m26cd_27d8e869c0800b12",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.8 divinorum/0.9992 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=m26cd.27d8e869c0800b12",
+                    "cluster": "m26cd.27d8e869c0800b12",
+                    "cluster_size": "3",
+                    "filetype": "",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20180910",
+                    "license": "RIL-1.0 [Rick's Internet License]",
+                    "family": "linux gafgyt backdoor",
+                    "md5_hashes": "['11679e2225f4db63c855eebf95203a023652a0be','a1852b960f3547531d404f62e3cf8b4287733c80','b34024ac1cf784d833624e44ed9f12e5faa37164']",
+                    "cluster_members": "http://icewater.io/en/cluster/detail?h64=m26cd.27d8e869c0800b12"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 5.690000034519471e-05,
+            "cache_load": 0.00048630000128468964,
+            "md5_calculation": 0.0003876999999192776,
+            "file_size_check": 4.410000110510737e-05,
+            "file_type_detection": 0.00021600000036414713,
+            "clamav_scan": 7.279999954334926e-05,
+            "yara_scan": 0.00698989999909827
+        },
+        "_stat": "103528:1753304746000000000"
+    },
+    "71a5ac8ed2727229d83e34e8a519256c": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 3.259999903093558e-05,
+            "cache_load": 0.00047540000014123507,
+            "md5_calculation": 0.00026330000036978163,
+            "file_size_check": 3.809999907389283e-05,
+            "file_type_detection": 0.00020869999934802763,
+            "clamav_scan": 7.439999899361283e-05,
+            "yara_scan": 0.1210332999999082,
+            "ml_scan": 0.00032160000046133064
+        },
+        "_stat": "36924:1753304722000000000"
+    },
+    "7a55fb35e153cd2ea04c7792fe6b3872": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": true,
+            "definition": "Virus.Hooker_Trojan.GenericKD.67881389.vir",
+            "similarity": 0.9999999937268096
+        },
+        "timings": {
+            "stat_check": 5.050000072515104e-05,
+            "cache_load": 0.0004685000003519235,
+            "md5_calculation": 0.02238740000029793,
+            "file_size_check": 0.0001021999996737577,
+            "file_type_detection": 0.00031549999948765617,
+            "clamav_scan": 0.00015189999976428226,
+            "yara_scan": 20.52724820000003,
+            "ml_scan": 2.4575327999991714
+        },
+        "_stat": "13070848:1753304776000000000"
+    },
+    "64ddc066e47659140890bb07a99178e8": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [
+            {
+                "rule": "k3f4_04968799c2200114",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.1 divinorum/0.998 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=k3f4.04968799c2200114",
+                    "cluster": "k3f4.04968799c2200114",
+                    "cluster_size": "31",
+                    "filetype": "application/x-dosexec",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20171118",
+                    "license": "RIL-1.0 [Rick's Internet License] ",
+                    "family": "bladabindi backdoor bkdr",
+                    "md5_hashes": "['1a223ac8fbc7eaacf27152439e8d9ec8','280cc4727b4881f77227d680d662d00e','d423e7a76d83811187520fc0faac50f0']"
+                }
+            },
+            {
+                "rule": "k3f4_131a8799c2200130",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.1 divinorum/0.998 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=k3f4.131a8799c2200130",
+                    "cluster": "k3f4.131a8799c2200130",
+                    "cluster_size": "66",
+                    "filetype": "application/x-dosexec",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20171118",
+                    "license": "RIL-1.0 [Rick's Internet License] ",
+                    "family": "bladabindi backdoor advml",
+                    "md5_hashes": "['2520944baf0b10879e1782772558765a','2aa503f958ba5e603e9222c75f510ec1','94a57d0e443e911171845112b7a4f327']"
+                }
+            },
+            {
+                "rule": "k3f4_13da8799c2200332",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.1 divinorum/0.998 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=k3f4.13da8799c2200332",
+                    "cluster": "k3f4.13da8799c2200332",
+                    "cluster_size": "9",
+                    "filetype": "application/x-dosexec",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20171118",
+                    "license": "RIL-1.0 [Rick's Internet License] ",
+                    "family": "bladabindi backdoor bkdr",
+                    "md5_hashes": "['003aa8469adddbdd68146c13780fb997','2712d32904583ae943dd88b2cf741304','dbd4c1795a8ce86c6f1f71df30c9140c']"
+                }
+            },
+            {
+                "rule": "k3f4_23ee8799c2200114",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.1 divinorum/0.998 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=k3f4.23ee8799c2200114",
+                    "cluster": "k3f4.23ee8799c2200114",
+                    "cluster_size": "4",
+                    "filetype": "",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20171122",
+                    "license": "RIL-1.0 [Rick's Internet License] ",
+                    "family": "bladabindi backdoor malicious",
+                    "md5_hashes": "['68d4607f555e6d3c2d7ddaf24d97e4dd','b1074510d8afcb30a84c8beb8e75156c','c79bffdb6a06be76ef4d5837b73c0567']"
+                }
+            },
+            {
+                "rule": "k3f4_40928799c2200114",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.1 divinorum/0.998 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=k3f4.40928799c2200114",
+                    "cluster": "k3f4.40928799c2200114",
+                    "cluster_size": "13",
+                    "filetype": "application/x-dosexec",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20171119",
+                    "license": "RIL-1.0 [Rick's Internet License] ",
+                    "family": "bladabindi backdoor malicious",
+                    "md5_hashes": "['3412229c35eda0da4fbce0da2c7405a2','6c187e36b1325a1d702047e7e07aede7','f27832088bb70ced442cc32730e64f0d']"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 5.380000038712751e-05,
+            "cache_load": 0.001686100000370061,
+            "md5_calculation": 0.003363300000273739,
+            "file_size_check": 0.0005982000002404675,
+            "file_type_detection": 0.0023163000005297363,
+            "clamav_scan": 0.0002722999997786246,
+            "yara_scan": 0.011747599999580416
+        },
+        "_stat": "20480:1753304504000000000"
+    },
+    "f19c4318cc1f85ff42125288297e5e28": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.0007122999995772261,
+            "cache_load": 0.0029209000003902474,
+            "md5_calculation": 0.002900499999668682,
+            "file_size_check": 0.00018290000116394367,
+            "file_type_detection": 0.0019136999999318505,
+            "clamav_scan": 0.0005541999998968095,
+            "yara_scan": 0.40109040000061214,
+            "ml_scan": 0.003057500000068103
+        },
+        "_stat": "216076:1753304456000000000"
+    },
+    "b2d8850e910e1583f2648dfcf1c507c4": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [
+            {
+                "rule": "VirusShareTrojanDownLoader2611513",
+                "tags": [],
+                "meta": {
+                    "description": "datamaliciousorder - file VirusShareTrojanDownLoader2611513.vir",
+                    "author": "Emirhan Ucan & Hacimurad",
+                    "reference": "VirusShare, VirusSign, ClamAV, Dr.Web, Emsisoft, VirusTotal",
+                    "date": "2024-11-12",
+                    "hash1": "f1dbd44c08a98245fd60f8203fbdb3c3b36d3c82e1146c553a588a26afb80b21"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 7.340000047406647e-05,
+            "cache_load": 0.0007245000015245751,
+            "md5_calculation": 0.005696899999747984,
+            "file_size_check": 9.060000047611538e-05,
+            "file_type_detection": 0.0007229000002553221,
+            "clamav_scan": 0.00015690000145696104,
+            "yara_scan": 0.07776620000004186
+        },
+        "_stat": "2550272:1753304716000000000"
+    },
+    "90384bfc5fc15e09758154d71ae735dd": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 4.0299999454873614e-05,
+            "cache_load": 0.0009620000000722939,
+            "md5_calculation": 0.0005034000005252892,
+            "file_size_check": 3.9599999581696466e-05,
+            "file_type_detection": 0.0005595999991783174,
+            "clamav_scan": 7.199999890872277e-05,
+            "yara_scan": 0.43306420000044454,
+            "ml_scan": 0.004644000000553206
+        },
+        "_stat": "211929:1753304518000000000"
+    },
+    "90d684c7f15903db5bd77b41579610ad": {
+        "status": "scanned",
+        "file_type": "Binary\nFormat: plain text",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.00023069999951985665,
+            "cache_load": 0.004283999998733634,
+            "md5_calculation": 0.00601970000025176,
+            "file_size_check": 0.0005858000004081987,
+            "file_type_detection": 0.003073699999731616,
+            "clamav_scan": 0.0012442000006558374,
+            "yara_scan": 0.0324361000002682,
+            "ml_scan": 0.00031850000050326344
+        },
+        "_stat": "415:1753304500000000000"
+    },
+    "ec1c9d8eaf5bb9d958e9e781f2df3604": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": true,
+            "definition": "Virus.Hijack_Gen.Trojan.ShellObject.vyZ@aSgChKg_4_2.vir",
+            "similarity": 0.9999999961564594
+        },
+        "timings": {
+            "stat_check": 3.470000046945643e-05,
+            "cache_load": 0.0019504000010783784,
+            "md5_calculation": 0.008568799999920884,
+            "file_size_check": 0.00011269999959040433,
+            "file_type_detection": 0.0022323000011965632,
+            "clamav_scan": 8.679999882588163e-05,
+            "yara_scan": 2.157066899999336,
+            "ml_scan": 1.625863000001118
+        },
+        "_stat": "1177424:1753304786000000000"
+    },
+    "b1f2db9b3996cd22d9ce4fb2fc40f8fd": {
+        "status": "scanned",
+        "file_type": "Binary\nFormat: plain text",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 4.930000068270601e-05,
+            "cache_load": 0.0006558999994012993,
+            "md5_calculation": 0.0010557999994489364,
+            "file_size_check": 0.0028311999994912185,
+            "file_type_detection": 0.001475699998991331,
+            "clamav_scan": 0.00017300000035902485,
+            "yara_scan": 0.02839040000071691,
+            "ml_scan": 0.0025543000010657124
+        },
+        "_stat": "260:1753304412000000000"
+    },
+    "27bd414e3791f81249d2dfccdcf6d49f": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.002659400000993628,
+            "cache_load": 0.002953200000774814,
+            "md5_calculation": 0.003327500000523287,
+            "file_size_check": 7.729999924777076e-05,
+            "file_type_detection": 0.002438100000290433,
+            "clamav_scan": 0.0006493999990198063,
+            "yara_scan": 0.229528300000311,
+            "ml_scan": 0.0002716999988479074
+        },
+        "_stat": "93792:1753304592000000000"
+    },
+    "4c88c6c9b677d23a6ef398aa170d5814": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [
+            {
+                "rule": "n26bb_3c9592a7d2ba7332",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.8 divinorum/0.9992 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=n26bb.3c9592a7d2ba7332",
+                    "cluster": "n26bb.3c9592a7d2ba7332",
+                    "cluster_size": "4",
+                    "filetype": "",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20180910",
+                    "license": "RIL-1.0 [Rick's Internet License]",
+                    "family": "autoit malicious fuerboos",
+                    "md5_hashes": "['2bed58b3ab4c7d6bd0aacb493225390cfdc98f53','b83c212a8ab3d090dc4d25832f477319c1a24480','f9b5c36f80fa9620a2e305b2414879071842cb0c']",
+                    "cluster_members": "http://icewater.io/en/cluster/detail?h64=n26bb.3c9592a7d2ba7332"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 5.160000000614673e-05,
+            "cache_load": 0.0006908999985171249,
+            "md5_calculation": 0.0017372000002069399,
+            "file_size_check": 4.660000013245735e-05,
+            "file_type_detection": 0.00025859999914246146,
+            "clamav_scan": 6.949999988137279e-05,
+            "yara_scan": 0.02148990000023332
+        },
+        "_stat": "1029120:1753304428000000000"
+    },
+    "71faebb773a9d3739bc23b77b3c8ff9c": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 5.310000051395036e-05,
+            "cache_load": 0.0005524999996850966,
+            "md5_calculation": 0.00017589999879419338,
+            "file_size_check": 3.4800001230905764e-05,
+            "file_type_detection": 0.00017280000065511558,
+            "clamav_scan": 6.589999975403771e-05,
+            "yara_scan": 0.026233900000079302,
+            "ml_scan": 0.0002688999993551988
+        },
+        "_stat": "666:1753304612000000000"
+    },
+    "c70bd045a02f55cd3a9623918fb85aeb": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "error",
+            "details": "module 'clamav' has no attribute 'engine'"
+        },
+        "yara_matches": [
+            {
+                "rule": "_NET_executable_",
+                "tags": [],
+                "meta": {
+                    "description": ".NET executable"
+                }
+            },
+            {
+                "rule": "NET_executable_",
+                "tags": [
+                    "PEiD"
+                ],
+                "meta": {}
+            },
+            {
+                "rule": "NET_executable",
+                "tags": [
+                    "PEiD"
+                ],
+                "meta": {}
+            },
+            {
+                "rule": "Microsoft_Visual_C__v7_0___Basic__NET",
+                "tags": [],
+                "meta": {}
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 3.0100000003585592e-05,
+            "cache_load": 0.0005562999995163409,
+            "md5_calculation": 0.0025486999984423164,
+            "file_size_check": 7.240000013553072e-05,
+            "file_type_detection": 0.00027490000138641335,
+            "clamav_scan": 7.019999975454994e-05,
+            "yara_scan": 2.753529999999955
+        },
+        "_stat": "1330176:1753304444000000000"
+    },
+    "e20a4287d60a677ab0f4c45d3494d4dc": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.0005913999993936159,
+            "cache_load": 0.0031178999997791834,
+            "md5_calculation": 0.017680000000837026,
+            "file_size_check": 0.00024669999947946053,
+            "file_type_detection": 0.004915400000754744,
+            "clamav_scan": 0.05591230000027281,
+            "yara_scan": 0.23587159999988216,
+            "ml_scan": 0.00027629999931377824
+        },
+        "_stat": "90564:1753304456000000000"
+    },
+    "cab1511d15a74a612f95d529f98b9004": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": true,
+            "definition": "Virus.Sysbot_Trojan.Peed.JLV_1.vir",
+            "similarity": 0.9999999998331076
+        },
+        "timings": {
+            "stat_check": 3.240000114601571e-05,
+            "cache_load": 0.0006725000002916204,
+            "md5_calculation": 0.0009023999991768505,
+            "file_size_check": 5.9300000430084765e-05,
+            "file_type_detection": 0.0002210000002378365,
+            "clamav_scan": 0.2468021000004228,
+            "yara_scan": 0.8638856999987183,
+            "ml_scan": 0.9835741999995662
+        },
+        "_stat": "416768:1753304594000000000"
+    },
+    "f4bf7f421a8742f686ebcecefb1b7e60": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.001859399999375455,
+            "cache_load": 0.0032250999993266305,
+            "md5_calculation": 0.6003810999991401,
+            "file_size_check": 0.0034369000004517147,
+            "file_type_detection": 0.009068900000784197,
+            "clamav_scan": 82.45204390000072,
+            "yara_scan": 98.0908901999992,
+            "ml_scan": 0.00030299999889393803
+        },
+        "_stat": "46007037:1753304682000000000"
+    },
+    "f335018d14db5e5dbd8f52304c5b161d": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 4.320000152802095e-05,
+            "cache_load": 0.0006571999983862042,
+            "md5_calculation": 0.0009092000000237022,
+            "file_size_check": 4.9000000217347406e-05,
+            "file_type_detection": 0.00020189999850117601,
+            "clamav_scan": 0.022456100001363666,
+            "yara_scan": 0.08116030000019236,
+            "ml_scan": 0.0003238000008423114
+        },
+        "_stat": "28884:1753304522000000000"
+    },
+    "62256754d74cb1fc2d39bc9bfac209e7": {
+        "status": "scanned",
+        "file_type": "Binary\nFormat: plain text",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 5.4600001021753997e-05,
+            "cache_load": 0.0006358000009640818,
+            "md5_calculation": 0.0018144000005122507,
+            "file_size_check": 5.0099999498343095e-05,
+            "file_type_detection": 0.0021839999990334036,
+            "clamav_scan": 0.48293680000097083,
+            "yara_scan": 0.30069410000032804,
+            "ml_scan": 0.00032699999974283855
+        },
+        "_stat": "271353:1753304588000000000"
+    },
+    "cd6ad0a569779332504355e88abd9e20": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [
+            {
+                "rule": "PEiD_02498_Video_Lan_Client_",
+                "tags": [],
+                "meta": {
+                    "description": "[Video-Lan-Client]",
+                    "ep_only": "true"
+                }
+            },
+            {
+                "rule": "Qemu_Detection_ren",
+                "tags": [],
+                "meta": {
+                    "Author": "Thomas Roccia - @fr0gger_ - Unprotect Project",
+                    "Description": "Checks for QEMU Registry Key"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 4.780000017490238e-05,
+            "cache_load": 0.0006494999997812556,
+            "md5_calculation": 0.015804500000740518,
+            "file_size_check": 8.610000077169389e-05,
+            "file_type_detection": 0.00042639999992388766,
+            "clamav_scan": 0.5997300999988511,
+            "yara_scan": 1.664572899999257
+        },
+        "_stat": "924672:1753304562000000000"
+    },
+    "5248701d238e250e7599300fd4dac050": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [
+            {
+                "rule": "_Nullsoft_PiMP_Stub__SFX_",
+                "tags": [],
+                "meta": {
+                    "description": "Nullsoft PiMP Stub -> SFX"
+                }
+            },
+            {
+                "rule": "Nullsoft_PiMP_Stub_SFX",
+                "tags": [
+                    "PEiD"
+                ],
+                "meta": {}
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.0019962000005762093,
+            "cache_load": 0.021960199999739416,
+            "md5_calculation": 0.10420150000027206,
+            "file_size_check": 0.005214900000282796,
+            "file_type_detection": 0.011500900000100955,
+            "clamav_scan": 1.1469874000013078,
+            "yara_scan": 2.6886032999991585
+        },
+        "_stat": "1153580:1753304730000000000"
+    },
+    "3576e5d16b1d8f2a8e580cd2f40a67d1": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [
+            {
+                "rule": "VirusShareTrojanDownLoader2611513",
+                "tags": [],
+                "meta": {
+                    "description": "datamaliciousorder - file VirusShareTrojanDownLoader2611513.vir",
+                    "author": "Emirhan Ucan & Hacimurad",
+                    "reference": "VirusShare, VirusSign, ClamAV, Dr.Web, Emsisoft, VirusTotal",
+                    "date": "2024-11-12",
+                    "hash1": "f1dbd44c08a98245fd60f8203fbdb3c3b36d3c82e1146c553a588a26afb80b21"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 3.8300000596791506e-05,
+            "cache_load": 0.0008433999992121244,
+            "md5_calculation": 0.004176599999482278,
+            "file_size_check": 7.209999967017211e-05,
+            "file_type_detection": 0.0002818000011757249,
+            "clamav_scan": 0.8186292000009416,
+            "yara_scan": 0.050621899999896414
+        },
+        "_stat": "1200640:1753304656000000000"
+    },
+    "43ebe0f2bc7d3d46cdbde9f4f4a065ff": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [
+            {
+                "rule": "SUSP_XORed_Mozilla_Oct19_RID2FA3",
+                "tags": [
+                    "DEMO",
+                    "SUSP",
+                    "T1110"
+                ],
+                "meta": {
+                    "description": "Detects suspicious single byte XORed keyword 'Mozilla/5.0' - it uses yara's XOR modifier and therefore cannot print the XOR key. You can use the CyberChef recipe linked in the reference field to brute force the used key.",
+                    "author": "Florian Roth",
+                    "reference": "https://gchq.github.io/CyberChef/#recipe=XOR_Brute_Force()",
+                    "date": "2019-10-28 12:05:41",
+                    "score": 60,
+                    "customer": "demo",
+                    "license": "CC-BY-NC https://creativecommons.org/licenses/by-nc/4.0/",
+                    "modified": "2023-11-03",
+                    "tags": "DEMO, SUSP, T1110",
+                    "minimum_yara": "3.8.0"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 6.890000076964498e-05,
+            "cache_load": 0.0008063000004767673,
+            "md5_calculation": 0.0010285999996995088,
+            "file_size_check": 4.680000165535603e-05,
+            "file_type_detection": 0.00022259999968810007,
+            "clamav_scan": 0.03964269999960379,
+            "yara_scan": 0.001626699999178527
+        },
+        "_stat": "80032:1753304678000000000"
+    },
+    "79f603a07cd1312b4386382464924920": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": true,
+            "definition": "Virus.Hijack_Gen.Trojan.ShellObject.m0Z@aiqugi_8_1.vir",
+            "similarity": 0.9999999981908223
+        },
+        "timings": {
+            "stat_check": 3.04000004689442e-05,
+            "cache_load": 0.0007666000001336215,
+            "md5_calculation": 0.005649200000334531,
+            "file_size_check": 7.549999827460852e-05,
+            "file_type_detection": 0.00026079999952344224,
+            "clamav_scan": 1.4544819000002462,
+            "yara_scan": 3.6069467999986955,
+            "ml_scan": 0.9911623000007239
+        },
+        "_stat": "2443264:1753304784000000000"
+    },
+    "34848a3b7ee934819e7e8b9353623087": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "threat_found",
+            "details": "Sanesecurity.Malware.20845.ZipHeur.UNOFFICIAL"
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 8.590000106778461e-05,
+            "cache_load": 0.001391699999658158,
+            "md5_calculation": 0.020903100001305575,
+            "file_size_check": 0.0002158999996026978,
+            "file_type_detection": 0.002021600001171464,
+            "clamav_scan": 0.010525300000153948
+        },
+        "_stat": "681678:1753304512000000000"
+    },
+    "0534cca650944d5bd06ee81f6d4b4698": {
+        "status": "scanned",
+        "file_type": "Binary\nFormat: plain text",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.0003966999993281206,
+            "cache_load": 0.004569599999740603,
+            "md5_calculation": 0.0012318000008235686,
+            "file_size_check": 4.669999907491729e-05,
+            "file_type_detection": 0.000685499999235617,
+            "clamav_scan": 0.013732400000662892,
+            "yara_scan": 0.027645699999993667,
+            "ml_scan": 0.002783800000543124
+        },
+        "_stat": "849:1753304500000000000"
+    },
+    "17efe0aea0c85d41e3f8b360b6ef7e3e": {
+        "status": "scanned",
+        "file_type": "Binary\nFormat: plain text",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.0030084999998507556,
+            "cache_load": 0.0161934999996447,
+            "md5_calculation": 0.007861300000513438,
+            "file_size_check": 0.0006873999991512392,
+            "file_type_detection": 0.013893299999836017,
+            "clamav_scan": 0.014412000000447733,
+            "yara_scan": 0.031630899999072426,
+            "ml_scan": 0.002151400000002468
+        },
+        "_stat": "963:1753304686000000000"
+    },
+    "4ff300c129ab094e86b0ed042e73ab11": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [
+            {
+                "rule": "m26cd_27d8e869c0800b12",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.8 divinorum/0.9992 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=m26cd.27d8e869c0800b12",
+                    "cluster": "m26cd.27d8e869c0800b12",
+                    "cluster_size": "3",
+                    "filetype": "",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20180910",
+                    "license": "RIL-1.0 [Rick's Internet License]",
+                    "family": "linux gafgyt backdoor",
+                    "md5_hashes": "['11679e2225f4db63c855eebf95203a023652a0be','a1852b960f3547531d404f62e3cf8b4287733c80','b34024ac1cf784d833624e44ed9f12e5faa37164']",
+                    "cluster_members": "http://icewater.io/en/cluster/detail?h64=m26cd.27d8e869c0800b12"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 9.950000094249845e-05,
+            "cache_load": 0.006623299999773735,
+            "md5_calculation": 0.005853300001035677,
+            "file_size_check": 0.0006518999998661457,
+            "file_type_detection": 0.0043256999997538514,
+            "clamav_scan": 0.06631580000066606,
+            "yara_scan": 0.010499900001377682
+        },
+        "_stat": "146208:1753304554000000000"
+    },
+    "ea7cf8f7d6dd1a4073210a3e9dcec223": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [
+            {
+                "rule": "m26cd_27d8e869c0800b12",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.8 divinorum/0.9992 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=m26cd.27d8e869c0800b12",
+                    "cluster": "m26cd.27d8e869c0800b12",
+                    "cluster_size": "3",
+                    "filetype": "",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20180910",
+                    "license": "RIL-1.0 [Rick's Internet License]",
+                    "family": "linux gafgyt backdoor",
+                    "md5_hashes": "['11679e2225f4db63c855eebf95203a023652a0be','a1852b960f3547531d404f62e3cf8b4287733c80','b34024ac1cf784d833624e44ed9f12e5faa37164']",
+                    "cluster_members": "http://icewater.io/en/cluster/detail?h64=m26cd.27d8e869c0800b12"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.0003864999998768326,
+            "cache_load": 0.00590609999926528,
+            "md5_calculation": 0.004487399999561603,
+            "file_size_check": 0.00015869999879214447,
+            "file_type_detection": 0.0009609999997337582,
+            "clamav_scan": 0.0834274999997433,
+            "yara_scan": 0.012933399999383255
+        },
+        "_stat": "163484:1753304630000000000"
+    },
+    "187cd22f4950371fc963510d7f6e81bd": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not-PE-File",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 0.0005972999988443917,
+            "cache_load": 0.0042530000009719515,
+            "md5_calculation": 0.04902600000059465,
+            "file_size_check": 0.00020880000010947697,
+            "file_type_detection": 0.002778500000204076,
+            "clamav_scan": 3.6594731000004685,
+            "yara_scan": 6.672069500000362,
+            "ml_scan": 0.00033630000143602956
+        },
+        "_stat": "2994176:1753304758000000000"
+    },
+    "1cc1cfbd2ce7dd6eef3c38de053bac39": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [
+            {
+                "rule": "SUSP_XORed_Mozilla_Oct19_RID2FA3",
+                "tags": [
+                    "DEMO",
+                    "SUSP",
+                    "T1110"
+                ],
+                "meta": {
+                    "description": "Detects suspicious single byte XORed keyword 'Mozilla/5.0' - it uses yara's XOR modifier and therefore cannot print the XOR key. You can use the CyberChef recipe linked in the reference field to brute force the used key.",
+                    "author": "Florian Roth",
+                    "reference": "https://gchq.github.io/CyberChef/#recipe=XOR_Brute_Force()",
+                    "date": "2019-10-28 12:05:41",
+                    "score": 60,
+                    "customer": "demo",
+                    "license": "CC-BY-NC https://creativecommons.org/licenses/by-nc/4.0/",
+                    "modified": "2023-11-03",
+                    "tags": "DEMO, SUSP, T1110",
+                    "minimum_yara": "3.8.0"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 5.4799998906673864e-05,
+            "cache_load": 0.0008741000001464272,
+            "md5_calculation": 0.0012996000004932284,
+            "file_size_check": 6.359999861160759e-05,
+            "file_type_detection": 0.0002365000000281725,
+            "clamav_scan": 0.04214950000095996,
+            "yara_scan": 0.002185800000006566
+        },
+        "_stat": "109884:1753304422000000000"
+    },
+    "8e157d250768392d7e8594574620b105": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [
+            {
+                "rule": "m3e9_5db28adaee57d131",
+                "tags": [],
+                "meta": {
+                    "copyright": "Copyright (c) 2014-2018 Support Intelligence Inc, All Rights Reserved.",
+                    "engine": "saphire/1.3.1 divinorum/0.998 icewater/0.4",
+                    "viz_url": "http://icewater.io/en/cluster/query?h64=m3e9.5db28adaee57d131",
+                    "cluster": "m3e9.5db28adaee57d131",
+                    "cluster_size": "5",
+                    "filetype": "",
+                    "tlp": "amber",
+                    "version": "icewater snowflake",
+                    "author": "Rick Wesson (@wessorh) rick@support-intelligence.com",
+                    "date": "20171123",
+                    "license": "RIL-1.0 [Rick's Internet License] ",
+                    "family": "malicious suspected unwanted",
+                    "md5_hashes": "['617c75a749ddf5ccc6f9cdbe74b138a7','66a867bec616edcb60835a545c451750','e4874337b67be7569a1e2b59fef76c42']"
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 4.000000080850441e-05,
+            "cache_load": 0.0013087999996059807,
+            "md5_calculation": 0.0012437000004865695,
+            "file_size_check": 5.810000038763974e-05,
+            "file_type_detection": 0.0002516999993531499,
+            "clamav_scan": 0.11065530000087165,
+            "yara_scan": 0.008879200000592391
+        },
+        "_stat": "156672:1753304754000000000"
+    },
+    "e407fe5f509774531702d722e7a8eef7": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [
+            {
+                "rule": "maldoc_getEIP_method_1_ren",
+                "tags": [
+                    "maldoc"
+                ],
+                "meta": {
+                    "author": "Didier Stevens (https://DidierStevens.com)"
+                }
+            },
+            {
+                "rule": "Qemu_Detection_ren",
+                "tags": [],
+                "meta": {
+                    "Author": "Thomas Roccia - @fr0gger_ - Unprotect Project",
+                    "Description": "Checks for QEMU Registry Key"
+                }
+            },
+            {
+                "rule": "Embedded_PE_ren",
+                "tags": [],
+                "meta": {
+                    "Author": "InQuest Labs",
+                    "URL": "https://github.com/InQuest/yara-rules",
+                    "Description": "Discover embedded PE files, without relying on easily stripped/modified header strings."
+                }
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 8.229999912146013e-05,
+            "cache_load": 0.0010211999997409293,
+            "md5_calculation": 0.00512929999968037,
+            "file_size_check": 9.820000013860408e-05,
+            "file_type_detection": 0.00023090000104275532,
+            "clamav_scan": 0.6564813000004506,
+            "yara_scan": 2.1640639000015653
+        },
+        "_stat": "760832:1753304786000000000"
+    },
+    "70ae5b6921bce523f0ee57b87f6c53fb": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": true,
+            "definition": "Virus.Hijack_Gen.Trojan.ShellObject.h8Y@auFLy0g_4_2.vir",
+            "similarity": 0.9999999946887073
+        },
+        "timings": {
+            "stat_check": 6.279999979597051e-05,
+            "cache_load": 0.0014709999995830003,
+            "md5_calculation": 0.0045368999999482185,
+            "file_size_check": 0.00010550000115472358,
+            "file_type_detection": 0.0003823000006377697,
+            "clamav_scan": 0.5096453999994992,
+            "yara_scan": 1.5233785999989777,
+            "ml_scan": 0.6231386999988899
+        },
+        "_stat": "707072:1753304594000000000"
+    },
+    "346da71ccec102706a06d02531730c32": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [
+            {
+                "rule": "_NET_executable_",
+                "tags": [],
+                "meta": {
+                    "description": ".NET executable"
+                }
+            },
+            {
+                "rule": "NET_executable_",
+                "tags": [
+                    "PEiD"
+                ],
+                "meta": {}
+            },
+            {
+                "rule": "NET_executable",
+                "tags": [
+                    "PEiD"
+                ],
+                "meta": {}
+            },
+            {
+                "rule": "Microsoft_Visual_C__v7_0___Basic__NET",
+                "tags": [],
+                "meta": {}
+            }
+        ],
+        "ml_result": {
+            "is_malicious": false,
+            "definition": "Not Scanned",
+            "similarity": 0.0
+        },
+        "timings": {
+            "stat_check": 4.73000000056345e-05,
+            "cache_load": 0.0010349999993195524,
+            "md5_calculation": 0.002979699998832075,
+            "file_size_check": 7.539999933214858e-05,
+            "file_type_detection": 0.000269900001512724,
+            "clamav_scan": 0.45724560000053316,
+            "yara_scan": 1.489659599999868
+        },
+        "_stat": "675328:1753304608000000000"
+    },
+    "24ee67859315fa2e43493da43276372c": {
+        "status": "scanned",
+        "file_type": "Unknown",
+        "clamav_result": {
+            "status": "clean",
+            "details": "No threat found."
+        },
+        "yara_matches": [],
+        "ml_result": {
+            "is_malicious": true,
+            "definition": "Virus.Hijack_Trojan.Agent.DQQO_159_2.vir",
+            "similarity": 0.9999999891301433
+        },
+        "timings": {
+            "stat_check": 5.7699999160831794e-05,
+            "cache_load": 0.0010402000007161405,
+            "md5_calculation": 0.16218579999986105,
+            "file_size_check": 8.309999975608662e-05,
+            "file_type_detection": 0.0003001000004587695,
+            "clamav_scan": 82.31572380000034,
+            "yara_scan": 99.82503519999955,
+            "ml_scan": 0.3233265999988362
+        },
+        "_stat": "73087684:1753304782000000000"
+    }
+}
