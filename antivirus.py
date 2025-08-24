@@ -433,17 +433,27 @@ def load_excluded_rules(filepath: str) -> Set[str]:
             logging.error(f"Error reading excluded rules file: {e}")
         return excluded
 
+def extract_yarax_match_details(rule, source):
+    """Extract match details from YARA-X rule match."""
+    return {
+        "rule": rule.identifier,
+        "tags": getattr(rule, 'tags', []),
+        "meta": {"source": source},
+    }
+
 def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -> List[Dict]:
     """
-    Scans a file sequentially against all preloaded YARA rules.
+    Scans a file sequentially against all preloaded YARA rules using threading for YARA-X.
     Returns the first set of matched rules (stops after first hit).
     Excludes rules in excluded_rules.
     """
     with perf_monitor.timer("yara_scan_total"):
         data_content = None
-
-        # Rules that classify file type only (not malware) -> ignore
-        benign_rules = {"PE_File_Magic", "ELF_File_Magic", "PDF_File_Magic"}
+        results_lock = threading.Lock()
+        results = {
+            'matched_rules': [],
+            'matched_results': []
+        }
 
         for rule_filename in ORDERED_YARA_FILES:
             if rule_filename not in _global_yara_compiled:
@@ -460,24 +470,40 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                         if not data_content:
                             continue
 
-                    with perf_monitor.timer("yara_x_scan"):
-                        scan_results = compiled.scan(data_content)
+                    # Thread worker for yaraxtr_rule scanning (YARA-X)
+                    def yaraxtr_rule_worker():
+                        try:
+                            if compiled:
+                                scan_results = compiled.scan(data_content)
+                                local_matched_rules = []
+                                local_matched_results = []
 
-                    matched = []
-                    for rule in getattr(scan_results, "matching_rules", []):
-                        if rule.identifier in excluded_rules:
-                            continue
-                        if rule.identifier in benign_rules:
-                            logging.debug(f"Ignored benign/classifier rule {rule.identifier} for {file_path}")
-                            continue
-                        matched.append({
-                            "rule": rule.identifier,
-                            "tags": [],
-                            "meta": {"source": rule_filename},
-                        })
+                                # Iterate through matching rules
+                                for rule in getattr(scan_results, "matching_rules", []):
+                                    if rule.identifier not in excluded_rules:
+                                        local_matched_rules.append(rule.identifier)
+                                        match_details = extract_yarax_match_details(rule, rule_filename)
+                                        local_matched_results.append(match_details)
+                                    else:
+                                        logging.info(f"Rule {rule.identifier} is excluded from {rule_filename}.")
 
-                    if matched:
-                        return matched
+                                # Update shared results
+                                with results_lock:
+                                    results['matched_rules'].extend(local_matched_rules)
+                                    results['matched_results'].extend(local_matched_results)
+                            else:
+                                logging.error(f"{rule_filename} is not defined.")
+                        except Exception as e:
+                            logging.error(f"Error scanning with {rule_filename}: {e}")
+
+                    # Run the worker in a thread
+                    thread = threading.Thread(target=yaraxtr_rule_worker)
+                    thread.start()
+                    thread.join()  # Wait for completion
+
+                    # Check if we found matches
+                    if results['matched_results']:
+                        return results['matched_results']
 
                 # --- yara-python mode ---
                 else:
@@ -490,9 +516,6 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                     filtered = []
                     for m in matches:
                         if m.rule in excluded_rules:
-                            continue
-                        if m.rule in benign_rules:
-                            logging.debug(f"Ignored benign/classifier rule {m.rule} for {file_path}")
                             continue
                         filtered.append({
                             "rule": m.rule,
