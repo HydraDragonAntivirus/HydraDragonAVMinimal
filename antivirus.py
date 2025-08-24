@@ -442,6 +442,9 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
     with perf_monitor.timer("yara_scan_total"):
         data_content = None
 
+        # Rules that classify file type only (not malware) -> ignore
+        benign_rules = {"PE_File_Magic", "ELF_File_Magic", "PDF_File_Magic"}
+
         for rule_filename in ORDERED_YARA_FILES:
             if rule_filename not in _global_yara_compiled:
                 continue
@@ -454,29 +457,24 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                         with perf_monitor.timer("yara_x_file_read"):
                             with open(file_path, "rb") as f:
                                 data_content = f.read()
+                        if not data_content:
+                            continue
 
-                    # Thread worker for yaraxtr_rule scanning (YARA-X)         
-                    try:                 
-                        if compiled:                     
-                            with perf_monitor.timer("yara_x_scan"):
-                                scan_results = compiled.scan(data_content)
-                            
-                            matched = []
-                            
-                            # Iterate through matching rules                     
-                            for rule in getattr(scan_results, "matching_rules", []):                         
-                                if rule.identifier not in excluded_rules:                             
-                                    matched.append({
-                                        "rule": rule.identifier,
-                                        "tags": [],
-                                        "meta": {"source": rule_filename},
-                                    })                                      
-                                else:                             
-                                    logging.info(f"Rule {rule.identifier} is excluded from yaraxtr_rule.")                                                  
-                        else:                     
-                            logging.error("yaraxtr_rule is not defined.")                 
-                    except Exception as e:                 
-                        logging.error(f"Error scanning with yaraxtr_rule: {e}")
+                    with perf_monitor.timer("yara_x_scan"):
+                        scan_results = compiled.scan(data_content)
+
+                    matched = []
+                    for rule in getattr(scan_results, "matching_rules", []):
+                        if rule.identifier in excluded_rules:
+                            continue
+                        if rule.identifier in benign_rules:
+                            logging.debug(f"Ignored benign/classifier rule {rule.identifier} for {file_path}")
+                            continue
+                        matched.append({
+                            "rule": rule.identifier,
+                            "tags": [],
+                            "meta": {"source": rule_filename},
+                        })
 
                     if matched:
                         return matched
@@ -492,6 +490,9 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                     filtered = []
                     for m in matches:
                         if m.rule in excluded_rules:
+                            continue
+                        if m.rule in benign_rules:
+                            logging.debug(f"Ignored benign/classifier rule {m.rule} for {file_path}")
                             continue
                         filtered.append({
                             "rule": m.rule,
