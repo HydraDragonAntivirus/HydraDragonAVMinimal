@@ -203,7 +203,7 @@ def preload_yara_rules(rules_dir: str):
                     if not _have_yara:
                         logging.warning(f"yara-python not available; cannot load {rule_filename}")
                         continue
-                    compiled = yara.load(filepath=rule_filepath)
+                    compiled = yara.load(path=rule_filepath)
                     _global_yara_compiled[rule_filename] = compiled
                 logging.info(f"Preloaded YARA rules: {rule_filename}")
             except Exception as e:
