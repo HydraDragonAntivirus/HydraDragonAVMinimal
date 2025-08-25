@@ -197,13 +197,16 @@ def preload_yara_rules(rules_dir: str):
                 continue
             try:
                 if rule_filename == 'yaraxtr.yrc' and _have_yara_x:
-                    rules = yara_x.Rules.deserialize_from(rule_filepath)
+                    # pass file object to deserialize_from
+                    with open(rule_filepath, "rb") as f:
+                        rules = yara_x.Rules.deserialize_from(f)
                     _global_yara_compiled[rule_filename] = yara_x.Scanner(rules=rules)
                 else:
                     if not _have_yara:
                         logging.warning(f"yara-python not available; cannot load {rule_filename}")
                         continue
-                    compiled = yara.load(path=rule_filepath)
+                    # works for precompiled YARA rules
+                    compiled = yara.load(rule_filepath)
                     _global_yara_compiled[rule_filename] = compiled
                 logging.info(f"Preloaded YARA rules: {rule_filename}")
             except Exception as e:
