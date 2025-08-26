@@ -448,9 +448,8 @@ def extract_yarax_match_details(rule, source):
 
 def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -> List[Dict]:
     """
-    Scans a file sequentially against all preloaded YARA rules using threading for YARA-X.
-    Returns the first set of matched rules (stops after first hit).
-    Excludes rules in excluded_rules.
+    Sequential YARA scanning. For YARA-X we do NOT spawn a thread here because
+    yara_x.Scanner objects are not sendable across threads.
     """
     with perf_monitor.timer("yara_scan_total"):
         data_content = None
@@ -475,36 +474,32 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                         if not data_content:
                             continue
 
-                    # Thread worker for yaraxtr_rule scanning (YARA-X)
-                    def yaraxtr_rule_worker():
-                        try:
-                            if compiled:
-                                scan_results = compiled.scan(data_content)
-                                local_matched_rules = []
-                                local_matched_results = []
+                    # Run worker *in the same thread* (no Thread creation)
+                    try:
+                        if compiled:
+                            # compiled might be a Rules object or a Scanner.
+                            # If it's a Scanner and was created on this thread, compiled.scan is fine.
+                            # If compiled is a rules object (yara_x.Rules), rules.scan(...) also works.
+                            scan_results = compiled.scan(data_content)
+                            local_matched_rules = []
+                            local_matched_results = []
 
-                                # Iterate through matching rules
-                                for rule in getattr(scan_results, "matching_rules", []):
-                                    if rule.identifier not in excluded_rules:
-                                        local_matched_rules.append(rule.identifier)
-                                        match_details = extract_yarax_match_details(rule, rule_filename)
-                                        local_matched_results.append(match_details)
-                                    else:
-                                        logging.info(f"Rule {rule.identifier} is excluded from {rule_filename}.")
+                            for rule in getattr(scan_results, "matching_rules", []):
+                                if rule.identifier not in excluded_rules:
+                                    local_matched_rules.append(rule.identifier)
+                                    match_details = extract_yarax_match_details(rule, rule_filename)
+                                    local_matched_results.append(match_details)
+                                else:
+                                    logging.info(f"Rule {rule.identifier} is excluded from {rule_filename}.")
 
-                                # Update shared results
-                                with results_lock:
-                                    results['matched_rules'].extend(local_matched_rules)
-                                    results['matched_results'].extend(local_matched_results)
-                            else:
-                                logging.error(f"{rule_filename} is not defined.")
-                        except Exception as e:
-                            logging.error(f"Error scanning with {rule_filename}: {e}")
-
-                    # Run the worker in a thread
-                    thread = threading.Thread(target=yaraxtr_rule_worker)
-                    thread.start()
-                    thread.join()  # Wait for completion
+                            # Update shared results
+                            with results_lock:
+                                results['matched_rules'].extend(local_matched_rules)
+                                results['matched_results'].extend(local_matched_results)
+                        else:
+                            logging.error(f"{rule_filename} is not defined.")
+                    except Exception as e:
+                        logging.error(f"Error scanning with {rule_filename}: {e}")
 
                     # Check if we found matches
                     if results['matched_results']:
