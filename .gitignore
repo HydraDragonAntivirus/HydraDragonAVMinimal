@@ -183,3 +183,4 @@ cython_debug/
 /detectiteasy
 /yara
 /machinelearning
+scan_cache.json
