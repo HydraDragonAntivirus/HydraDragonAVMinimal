@@ -1405,33 +1405,28 @@ def load_ml_definitions(filepath: str) -> bool:
         return False
 
 # ---------------- Result logging ----------------
-def log_scan_result(md5: str, result: Dict[str, Any], from_cache: bool = False):
+def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
     # Determine if the result indicates a threat
     is_threat = (
         result.get('clamav_result', {}).get('status') == 'threat_found' or
         len(result.get('yara_matches', [])) > 0 or
         result.get('ml_result', {}).get('is_malicious', False)
     )
-
-    # Only log if a threat was detected
     if not is_threat:
         return
 
     source = "(From Cache)" if from_cache else "(New Scan)"
-    logging.info("\n" + "="*50)
-    logging.info(f"!!! MALWARE DETECTED !!! {source}")
-    logging.info(f"File MD5: {md5}")
-    logging.info("="*50)
-    status = result.get('status')
-    logging.info(f"STATUS: {status}")
-    logging.info("--- ClamAV ---")
-    logging.info(str(result.get('clamav_result')))
-    logging.info("--- YARA ---")
-    logging.info(str(result.get('yara_matches')))
-    logging.info("--- ML ---")
-    logging.info(str(result.get('ml_result')))
-    logging.info("="*50)
-
+    logging.info(
+        f"\n{'='*50}\n"
+        f"!!! MALWARE DETECTED !!! {source}\n"
+        f"File MD5: {md5}\n"
+        f"{'='*50}\n"
+        f"STATUS: {result.get('status')}\n"
+        f"--- ClamAV ---\n{result.get('clamav_result')}\n"
+        f"--- YARA ---\n{result.get('yara_matches')}\n"
+        f"--- ML ---\n{result.get('ml_result')}\n"
+        f"{'='*50}"
+    )
 
 # ---------------- Cache helpers ----------------
 def find_cache_by_stat(cache: Dict[str, Any], stat_key: str) -> Optional[tuple]:
