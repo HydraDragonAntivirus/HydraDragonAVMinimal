@@ -19,7 +19,6 @@ import threading
 from typing import List, Dict, Any, Optional, Set, Tuple
 import inspect
 import copy
-import tempfile
 import numpy as np
 import capstone
 
@@ -1586,29 +1585,39 @@ def load_scan_cache(filepath: str) -> Dict[str, Any]:
     
     return {'_clamav_db_version': get_clamav_db_version()}
 
-def save_scan_cache(filepath: str, cache: Dict[str, Any]):
-    """Save complete scan cache safely (atomic write)."""
+def save_scan_cache(filepath: str, new_data: Dict[str, Any]):
+    """Merge and safely save scan cache (preserve old entries)."""
     try:
+        # Load existing cache if present
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+            except Exception:
+                logging.warning("Existing cache corrupted, starting fresh")
+                existing = {}
+        else:
+            existing = {}
+
+        # Merge new data into existing
+        for k, v in new_data.items():
+            existing[k] = v
+
         # Update metadata
-        cache['_clamav_db_version'] = get_clamav_db_version()
-        cache['_last_save'] = time.time()
+        existing['_clamav_db_version'] = get_clamav_db_version()
+        existing['_last_save'] = time.time()
 
-        # Write to a temporary file first
-        dirpath = os.path.dirname(filepath) or "."
-        with tempfile.NamedTemporaryFile('w', dir=dirpath, delete=False, encoding='utf-8') as tmpf:
-            json.dump(cache, tmpf, indent=4)
-            tmpf.flush()
-            os.fsync(tmpf.fileno())
-            tempname = tmpf.name
+        # Rewrite file (single file only, no tmp/bak)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(existing, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
 
-        # Atomically replace the old cache file
-        os.replace(tempname, filepath)
-
-        cached_files = len([k for k in cache.keys() if not k.startswith('_')])
-        logging.debug(f"Safely saved cache with {cached_files} entries (including all scan results)")
+        cached_files = len([k for k in existing.keys() if not k.startswith('_')])
+        logging.debug(f"Merged + saved cache with {cached_files} entries")
 
     except Exception as e:
-        logging.error(f"Could not safely save cache file: {e}")
+        logging.error(f"Could not merge/save cache: {e}")
 
 # ---------------- Modified process_file with hybrid caching ----------------
 def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
