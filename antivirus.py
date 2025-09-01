@@ -342,28 +342,18 @@ def load_excluded_rules(filepath: str) -> List[str]:
         return []
 
 def extract_yarax_match_details(rule, source):
-    """Extract match details from YARA-X rule match."""
-    return {
-        "rule": rule.identifier,
-        "tags": getattr(rule, 'tags', []),
-        "meta": {"source": source},
-    }
+    """Extract only rule name from YARA-X rule match."""
+    return rule.identifier  # Return only the rule name as string
 
-def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -> List[Dict]:
+def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -> List[str]:
     """
-    Sequential YARA scanning. For YARA-X we do NOT spawn a thread here because
-    yara_x.Scanner objects are not sendable across threads.
+    Sequential YARA scanning that returns only rule names (not full details).
     """
-    # Fix: Ensure excluded_rules is never None
     if excluded_rules is None:
         excluded_rules = set()
     
     data_content = None
-    results_lock = threading.Lock()
-    results = {
-        'matched_rules': [],
-        'matched_results': []
-    }
+    matched_rules = []
 
     for rule_filename in ORDERED_YARA_FILES:
         if rule_filename not in _global_yara_compiled:
@@ -379,44 +369,27 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                     if not data_content:
                         continue
 
-                # Run worker *in the same thread* (no Thread creation)
                 try:
                     if compiled:
-                        # compiled might be a Rules object or a Scanner.
-                        # If it's a Scanner and was created on this thread, compiled.scan is fine.
-                        # If compiled is a rules object (yara_x.Rules), rules.scan(...) also works.
-                        # Always build a fresh Scanner in the current thread to avoid cross-thread issues
                         rules_obj = getattr(compiled, "rules", None)
                         if rules_obj is None:
                             rules_obj = compiled
                         scanner = yara_x.Scanner(rules=rules_obj)
                         scan_results = scanner.scan(data_content)
-                        local_matched_rules = []
-                        local_matched_results = []
 
-                        # Fix: Handle case where matching_rules might be None
                         matching_rules = getattr(scan_results, "matching_rules", None)
                         if matching_rules is not None:
                             for rule in matching_rules:
-                                # Fix: Safely check rule.identifier
                                 rule_id = getattr(rule, 'identifier', None)
                                 if rule_id is not None and rule_id not in excluded_rules:
-                                    local_matched_rules.append(rule_id)
-                                    match_details = extract_yarax_match_details(rule, rule_filename)
-                                    local_matched_results.append(match_details)
+                                    matched_rules.append(rule_id)  # Only append rule name
 
-                        # Update shared results
-                        with results_lock:
-                            results['matched_rules'].extend(local_matched_rules)
-                            results['matched_results'].extend(local_matched_results)
-                    else:
-                        logging.error(f"{rule_filename} is not defined.")
+                        # Return immediately if matches found
+                        if matched_rules:
+                            return matched_rules
+
                 except Exception as e:
                     logging.error(f"Error scanning with {rule_filename}: {e}")
-
-                # Check if we found matches
-                if results['matched_results']:
-                    return results['matched_results']
 
             # --- yara-python mode ---
             else:
@@ -425,24 +398,18 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
 
                 matches = compiled.match(filepath=file_path)
 
-                filtered = []
                 for m in matches:
-                    if m.rule in excluded_rules:
-                        continue
-                    filtered.append({
-                        "rule": m.rule,
-                        "tags": m.tags,
-                        "meta": getattr(m, "meta", {}),
-                    })
+                    if m.rule not in excluded_rules:
+                        matched_rules.append(m.rule)  # Only append rule name
 
-                if filtered:
-                    return filtered
+                if matched_rules:
+                    return matched_rules
 
         except Exception as e:
             logging.error(f"Error during YARA scan with {rule_filename} on {file_path}: {e}")
             continue
 
-    return []
+    return matched_rules
 
 # --- PE Analysis and Feature Extraction Functions ---
 
@@ -974,7 +941,6 @@ class PEFeatureExtractor:
                 # Attempt to load PE file directly
                 pe = pefile.PE(file_path, fast_load=True)
             except pefile.PEFormatError:
-                logging.error(f"{file_path} is not a valid PE file.")
                 return None
             except Exception as ex:
                 logging.error(f"Error loading {file_path} as PE: {str(ex)}", exc_info=True)
@@ -1149,45 +1115,31 @@ def calculate_vector_similarity(vec1: List[float], vec2: List[float]) -> float:
     cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
     return (cosine_similarity + 1) / 2
 
-def scan_file_with_machine_learning_ai(
-    file_path: str,
-    mal_features: List[List[float]],
-    mal_names: List[str],
-    ben_features: List[List[float]],
-    ben_names: List[str],
-    threshold=0.86
-) -> Tuple[bool, str, float]:
-    """Scan a file for malicious activity using machine learning definitions passed as arguments."""
+def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
+    """Scan a file for malicious activity using machine learning definitions loaded from JSON."""
     malware_definition = "Unknown"
+    logging.info(f"Starting machine learning scan for file: {file_path}")
 
     try:
         pe = pefile.PE(file_path)
         pe.close()
     except pefile.PEFormatError:
-        return False, malware_definition, 0.0
+        logging.error(f"File {file_path} is not a valid PE file. Returning default value 'Unknown'.")
+        return False, malware_definition, 0
 
-    file_numeric_features_dict = pe_extractor.extract_numeric_features(file_path)
-    if not file_numeric_features_dict:
-        return False, "Feature-Extraction-Failed", 0.0
+    logging.info(f"File {file_path} is a valid PE file, proceeding with feature extraction.")
 
-    # The ML loading function now returns a tuple of lists, one of which is the numeric features
-    # We need to ensure that the feature extraction here produces a list in the same order.
-    # The `load_ml_definitions` function has an `entry_to_numeric` helper that defines this order.
-    # We need to replicate that process here for the file being scanned.
-    # For simplicity, let's create a temporary dict structure similar to what `entry_to_numeric` expects.
-    
-    temp_entry_for_conversion = {"file_info": {"filename": os.path.basename(file_path)}}
-    temp_entry_for_conversion.update(file_numeric_features_dict)
-    
-    file_numeric_features, _ = load_ml_definitions.entry_to_numeric(temp_entry_for_conversion)
-
+    # Use unified cache for feature extraction
+    file_numeric_features = get_cached_pe_features(file_path)
+    if not file_numeric_features:
+        return False, "Feature-Extraction-Failed", 0
 
     is_malicious_ml = False
-    nearest_malicious_similarity = 0.0
-    nearest_benign_similarity = 0.0
+    nearest_malicious_similarity = 0
+    nearest_benign_similarity = 0
 
     # Check malicious definitions
-    for ml_feats, info in zip(mal_features, mal_names):
+    for ml_feats, info in zip(malicious_numeric_features, malicious_file_names):
         similarity = calculate_vector_similarity(file_numeric_features, ml_feats)
         nearest_malicious_similarity = max(nearest_malicious_similarity, similarity)
 
@@ -1209,7 +1161,7 @@ def scan_file_with_machine_learning_ai(
 
     # If not malicious, check benign
     if not is_malicious_ml:
-        for ml_feats, info in zip(ben_features, ben_names):
+        for ml_feats, info in zip(benign_numeric_features, benign_file_names):
             similarity = calculate_vector_similarity(file_numeric_features, ml_feats)
             nearest_benign_similarity = max(nearest_benign_similarity, similarity)
 
@@ -1236,12 +1188,15 @@ def scan_file_with_machine_learning_ai(
 
 # Load ML definitions
 
-def load_ml_definitions(filepath: str) -> Optional[Tuple[List, List, List, List]]:
+def load_ml_definitions(filepath: str) -> bool:
     """
-    Load ML definitions from a JSON file and returns them as tuples of lists.
+    Load ML definitions from a JSON file and populate global numeric feature lists.
     This version understands the extended feature set produced by PEFeatureExtractor
+    (section_disassembly, section_characteristics, overlay size, relocations, TLS callbacks, etc.)
     and is defensive about missing or unexpected types.
     """
+    global malicious_numeric_features, malicious_file_names, benign_numeric_features, benign_file_names
+
     def to_float(x, default=0.0):
         try:
             if x is None:
@@ -1426,14 +1381,11 @@ def load_ml_definitions(filepath: str) -> Optional[Tuple[List, List, List, List]
 
         filename = (entry.get("file_info", {}) or {}).get("filename", "unknown")
         return numeric, filename
-    
-    # Attach the helper function to the main function so it can be used elsewhere
-    load_ml_definitions.entry_to_numeric = entry_to_numeric
 
     # --- main loader body ---
     if not os.path.exists(filepath):
         logging.error(f"Machine learning definitions file not found: {filepath}. ML scanning will be disabled.")
-        return None
+        return False
 
     try:
         with open(filepath, 'r', encoding='utf-8-sig') as results_file:
@@ -1458,11 +1410,11 @@ def load_ml_definitions(filepath: str) -> Optional[Tuple[List, List, List, List]
             benign_file_names.append(filename)
 
         logging.info(f"[!] Loaded {len(malicious_numeric_features)} malicious and {len(benign_numeric_features)} benign ML definitions (vectors length = {len(malicious_numeric_features[0]) if malicious_numeric_features else 'N/A'}).")
-        return (malicious_numeric_features, malicious_file_names, benign_numeric_features, benign_file_names)
+        return True
 
     except (json.JSONDecodeError, IOError) as e:
         logging.error(f"Failed to load or parse ML definitions from {filepath}: {e}. ML scanning will be disabled.")
-        return None
+        return False
 
 # ---------------- Result logging ----------------
 def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
@@ -1476,6 +1428,19 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
         return
 
     source = "(From Cache)" if from_cache else "(New Scan)"
+    
+    # Format YARA matches as simple list of rule names
+    yara_rules = result.get('yara_matches', [])
+    if isinstance(yara_rules, list) and yara_rules:
+        if isinstance(yara_rules[0], dict):
+            # Old format with full details
+            yara_display = [match.get('rule', 'Unknown') for match in yara_rules]
+        else:
+            # New format with just rule names
+            yara_display = yara_rules
+    else:
+        yara_display = []
+    
     logging.info(
         f"\n{'='*50}\n"
         f"!!! MALWARE DETECTED !!! {source}\n"
@@ -1483,7 +1448,7 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
         f"{'='*50}\n"
         f"STATUS: {result.get('status')}\n"
         f"--- ClamAV ---\n{json.dumps(result.get('clamav_result'), indent=2)}\n"
-        f"--- YARA ---\n{json.dumps(result.get('yara_matches'), indent=2)}\n"
+        f"--- YARA ---\nMatched Rules: {', '.join(yara_display) if yara_display else 'None'}\n"
         f"--- ML ---\n{json.dumps(result.get('ml_result'), indent=2)}\n"
         f"{'='*50}"
     )
@@ -1573,11 +1538,24 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
             'file_type': file_type,
             '_stat': stat_key
         }
-        cache = load_scan_cache(SCAN_CACHE_FILE)
-        # Only save if cache still has the expected database state hash
-        if cache.get('_database_state_hash') == db_hash:
-            cache[md5_hash] = cacheable_result
-            save_scan_cache(SCAN_CACHE_FILE, cache)
+        
+        # Load cache fresh each time to avoid race conditions
+        current_cache = load_scan_cache(SCAN_CACHE_FILE)
+        
+        # Initialize cache if it doesn't exist or database state changed
+        if current_cache.get('_database_state_hash') != db_hash:
+            logging.info(f"Initializing cache with new database state hash: {db_hash}")
+            current_cache = {'_database_state_hash': db_hash}
+        
+        # Add the new scan result
+        current_cache[md5_hash] = cacheable_result
+        
+        # Save the updated cache
+        try:
+            save_scan_cache(SCAN_CACHE_FILE, current_cache)
+            logging.debug(f"Cached scan result for {os.path.basename(file_to_scan)} (MD5: {md5_hash})")
+        except Exception as e:
+            logging.error(f"Failed to save cache: {e}")
 
     return is_threat, potential_fp_info
 
