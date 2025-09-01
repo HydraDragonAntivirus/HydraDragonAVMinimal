@@ -11,6 +11,7 @@ import hashlib
 import string
 import inspect
 import subprocess
+import threading
 from typing import List, Dict, Any, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
@@ -39,6 +40,8 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
 )
+
+thread_lock = threading.Lock()
 
 # ---------------- Paths & configuration ----------------
 YARA_RULES_DIR = os.path.join(script_dir, 'yara')
@@ -1570,23 +1573,21 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
             '_stat': stat_key
         }
         
-        # Load cache fresh each time to avoid race conditions
-        current_cache = load_scan_cache(SCAN_CACHE_FILE)
-        
-        # Initialize cache if it doesn't exist or database state changed
-        if current_cache.get('_database_state_hash') != db_hash:
-            logging.info(f"Initializing cache with new database state hash: {db_hash}")
-            current_cache = {'_database_state_hash': db_hash}
-        
-        # Add the new scan result
-        current_cache[md5_hash] = cacheable_result
-        
-        # Save the updated cache
-        try:
-            save_scan_cache(SCAN_CACHE_FILE, current_cache)
-            logging.debug(f"Cached scan result for {os.path.basename(file_to_scan)} (MD5: {md5_hash})")
-        except Exception as e:
-            logging.error(f"Failed to save cache: {e}")
+        # Thread-safe cache update
+        with thread_lock:
+            current_cache = load_scan_cache(SCAN_CACHE_FILE)
+
+            if current_cache.get('_database_state_hash') != db_hash:
+                logging.info(f"Initializing cache with new database state hash: {db_hash}")
+                current_cache = {'_database_state_hash': db_hash}
+
+            current_cache[md5_hash] = cacheable_result
+
+            try:
+                save_scan_cache(SCAN_CACHE_FILE, current_cache)
+                logging.debug(f"Cached scan result for {os.path.basename(file_to_scan)} (MD5: {md5_hash})")
+            except Exception as e:
+                logging.error(f"Failed to save cache: {e}")
 
     return is_threat, potential_fp_info
 
