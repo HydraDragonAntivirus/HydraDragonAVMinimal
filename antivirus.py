@@ -1637,11 +1637,7 @@ def main():
     preload_yara_rules(YARA_RULES_DIR)
     excluded_yara_rules = set(load_excluded_rules(EXCLUDED_RULES_FILE))
     
-    ml_data = load_ml_definitions(ML_RESULTS_JSON)
-    if ml_data:
-        mal_features, mal_names, ben_features, ben_names = ml_data
-    else:
-        mal_features, mal_names, ben_features, ben_names = [], [], [], []
+    load_ml_definitions(ML_RESULTS_JSON)
 
     # Initialize cache with correct database state hash (prevent duplicate warnings)
     cache = load_scan_cache(SCAN_CACHE_FILE)
