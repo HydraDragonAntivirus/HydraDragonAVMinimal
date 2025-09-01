@@ -24,8 +24,23 @@ import clamav
 
 script_dir = os.getcwd()
 
+# Define log directories and files
+log_directory = os.path.join(script_dir, "log")
+if not os.path.exists(log_directory):
+    os.makedirs(log_directory)
+
+application_log_file = os.path.join(
+    log_directory, "antivirus.log"
+)
+
+# Configure logging for application log
+logging.basicConfig(
+    filename=application_log_file,
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+)
+
 # ---------------- Paths & configuration ----------------
-LOG_FILE = 'antivirus.log'
 YARA_RULES_DIR = os.path.join(script_dir, 'yara')
 EXCLUDED_RULES_FILE = os.path.join(script_dir, 'excluded', 'excluded_rules.txt')
 ML_RESULTS_JSON = os.path.join(script_dir, 'machine_learning', 'results.json')
@@ -1581,15 +1596,6 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
 def main():
     global excluded_yara_rules, _global_db_state_hash
     global mal_features, mal_names, ben_features, ben_names
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        filename=LOG_FILE,
-        filemode="w"
-    )
-    logging.captureWarnings(True)
-    print(f"Script starting - detailed log: {LOG_FILE}")
-
     parser = argparse.ArgumentParser(description="HydraDragon (IN-PROCESS libclamav only, NO TIMEOUTS) + YARA + ML")
     parser.add_argument("--clear-cache", action="store_true", help="Clear scan cache before starting")
     parser.add_argument("path", nargs="?", help="Path to file or directory to scan")
