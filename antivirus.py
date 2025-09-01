@@ -1547,7 +1547,7 @@ def _extract_rule_name_from_match(m):
 def collect_false_positive_rules_from_cache(cache_dict, already_excluded=None, min_frequency=1):
     rule_counter = Counter()
     excluded = set(already_excluded or [])
-    for entry in cache_dict.values():
+    for entry in tqdm(cache_dict.values(), desc="Analyzing cache for FPs", unit="entry"):
         if not isinstance(entry, dict): continue
         is_clean = (entry.get("clamav_result", {}).get("status") != "threat_found" and 
                     not (entry.get("ml_result") or {}).get("is_malicious"))
@@ -1556,23 +1556,6 @@ def collect_false_positive_rules_from_cache(cache_dict, already_excluded=None, m
                 if rname and rname not in excluded:
                     rule_counter[rname] += 1
     return Counter({r: c for r, c in rule_counter.items() if c >= min_frequency})
-
-def auto_append_excluded_rules(cache_path, excluded_rules_file, backup=True, min_frequency=1):
-    cache = load_scan_cache(cache_path)
-    existing = load_excluded_rules(excluded_rules_file)
-    candidates = collect_false_positive_rules_from_cache(cache, already_excluded=existing, min_frequency=min_frequency)
-    if not candidates: return [], candidates
-
-    if backup and os.path.exists(excluded_rules_file):
-        shutil.copy(excluded_rules_file, excluded_rules_file + ".bak")
-
-    added = []
-    with open(excluded_rules_file, "a", encoding="utf-8") as fh:
-        for rule in sorted(candidates.keys()):
-            if rule not in existing:
-                fh.write(rule.strip() + "\n")
-                added.append(rule)
-    return added, candidates
 
 def main():
     # --- Main Process Setup ---
@@ -1590,7 +1573,7 @@ def main():
     parser = argparse.ArgumentParser(description="HydraDragon Antivirus Scanner")
     parser.add_argument("path", help="Path to file or directory to scan")
     parser.add_argument("--clear-cache", action="store_true", help="Clear disk scan cache before running")
-    parser.add_argument("--false-positive-test", action="store_true", help="Auto-exclude YARA rules from clean files")
+    parser.add_argument("--false-positive-test", action="store_true", help="Analyze scan results for potential YARA false positives")
     parser.add_argument("--workers", type=int, default=os.cpu_count(), help="Number of worker processes")
     args = parser.parse_args()
 
@@ -1661,13 +1644,36 @@ def main():
                  f"  Total Clean Files: {total_files - malicious_count}\n"
                  f"  Execution Time: {wall_elapsed:.2f}s\n{'='*60}")
     
+    # --- False Positive Analysis (if requested) ---
     if args.false_positive_test:
-        logging.info("Running auto false-positive test...")
-        added, _ = auto_append_excluded_rules(SCAN_CACHE_FILE, EXCLUDED_RULES_FILE)
-        if added:
-            logging.info(f"Auto-excluded {len(added)} YARA rules.")
+        logging.info("Running false-positive analysis on scan results...")
+        scan_cache_data = load_scan_cache(SCAN_CACHE_FILE)
+        
+        # We pass the already loaded excluded rules to avoid re-identifying them
+        potential_fps = collect_false_positive_rules_from_cache(
+            scan_cache_data, 
+            already_excluded=excluded_yara_rules
+        )
+        
+        if potential_fps:
+            # Get the logger to print the report
+            logger = logging.getLogger('')
+            logger.info(f"\n{'='*70}\n               POTENTIAL YARA FALSE POSITIVES REPORT\n{'='*70}")
+            logger.info(f"The following YARA rules matched on files that were otherwise clean")
+            logger.info(f"(i.e., no ClamAV or Machine Learning detection).")
+            logger.info(f"Review these rules and consider adding them to '{EXCLUDED_RULES_FILE}'.")
+            logger.info(f"{'-'*70}")
+            
+            # Sort by count (most common first) and then by rule name
+            sorted_rules = sorted(potential_fps.items(), key=lambda item: (-item[1], item[0]))
+            
+            for rule, count in sorted_rules:
+                logger.info(f"  - Rule: {rule:<50} Matched on {count} clean file(s)")
+            logger.info(f"{'='*70}")
         else:
-            logging.info("No new rules to auto-exclude.")
+            logging.info("No potential false positives found in this scan.")
+
 
 if __name__ == "__main__":
     main()
+
