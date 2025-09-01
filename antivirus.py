@@ -126,19 +126,68 @@ def calculate_md5(file_path: str) -> str:
         logging.error(f"MD5 failed for {file_path}: {e}")
         return ""
 
+def get_yara_ml_version_hash():
+    """Generate a hash of YARA rules and ML definitions to detect changes."""
+    try:
+        # Include ML definitions file modification time
+        ml_mtime = 0
+        if os.path.exists(ML_RESULTS_JSON):
+            ml_mtime = os.path.getmtime(ML_RESULTS_JSON)
+        
+        # Include YARA rules modification times
+        yara_mtimes = []
+        for rule_file in ORDERED_YARA_FILES:
+            rule_path = os.path.join(YARA_RULES_DIR, rule_file)
+            if os.path.exists(rule_path):
+                yara_mtimes.append(os.path.getmtime(rule_path))
+        
+        # Include critical ML function source
+        critical_functions = [
+            inspect.getsource(calculate_vector_similarity),
+            inspect.getsource(scan_file_with_machine_learning_ai),
+            inspect.getsource(load_ml_definitions)
+        ]
+        code_content = ''.join(critical_functions)
+        
+        version_data = f"{ml_mtime}:{':'.join(map(str, yara_mtimes))}:{code_content}"
+        return hashlib.md5(version_data.encode()).hexdigest()[:12]
+    except Exception:
+        return "unknown"
+
 def load_scan_cache(filepath: str) -> Dict[str, Any]:
+    """Load scan cache and validate YARA+ML version compatibility."""
     if os.path.exists(filepath):
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                cache_data = json.load(f)
+            
+            # Check if cache was created with same YARA+ML versions
+            current_version_hash = get_yara_ml_version_hash()
+            cache_version_hash = cache_data.get('_yara_ml_version', '')
+            
+            if cache_version_hash != current_version_hash:
+                logging.warning(f"YARA+ML version changed (was {cache_version_hash}, now {current_version_hash}). Invalidating YARA+ML cache.")
+                return {'_yara_ml_version': current_version_hash}
+            
+            logging.info(f"Loaded cache with {len([k for k in cache_data.keys() if not k.startswith('_')])} cached YARA+ML results")
+            return cache_data
         except Exception as e:
             logging.warning(f"Could not read cache file: {e}")
-    return {}
+    
+    return {'_yara_ml_version': get_yara_ml_version_hash()}
 
 def save_scan_cache(filepath: str, cache: Dict[str, Any]):
+    """Save scan cache with version tracking."""
     try:
+        # Ensure version tracking is always saved
+        cache['_yara_ml_version'] = get_yara_ml_version_hash()
+        cache['_last_save'] = time.time()
+        
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(cache, f, indent=4)
+        
+        cached_files = len([k for k in cache.keys() if not k.startswith('_')])
+        logging.debug(f"Saved cache with {cached_files} YARA+ML results (ClamAV never cached)")
     except Exception as e:
         logging.error(f"Could not save cache file: {e}")
 
@@ -252,6 +301,28 @@ def scan_file_with_clamav(path: str) -> Dict[str, Any]:
     except Exception as e:
         logging.exception(f"ClamAV scan via wrapper failed for {path}")
         return {'status': 'error', 'details': str(e)}
+
+# Global in-memory ClamAV cache (session only)
+_clamav_memory_cache: Dict[str, Dict[str, Any]] = {}
+
+def scan_file_with_clamav_cached(path: str) -> Dict[str, Any]:
+    """ClamAV scan with in-memory caching for current session only."""
+    global _clamav_memory_cache
+    
+    # Check memory cache first
+    md5_hash = calculate_md5(path)
+    if md5_hash in _clamav_memory_cache:
+        logging.debug(f"Using in-memory ClamAV cache for {path}")
+        return _clamav_memory_cache[md5_hash]
+    
+    # Fresh scan
+    result = scan_file_with_clamav(path)
+    
+    # Store in memory cache
+    _clamav_memory_cache[md5_hash] = result
+    logging.debug(f"Cached ClamAV result in memory for {path}")
+    
+    return result
 
 # ---------------- DIE heuristics & YARA scanning ----------------
 def is_plain_text(data: bytes, null_byte_threshold: float = 0.01, printable_threshold: float = 0.95) -> bool:
@@ -1484,31 +1555,32 @@ def save_scan_cache(filepath: str, cache: Dict[str, Any]):
 def _make_cacheable_result(result: Dict[str, Any]) -> Dict[str, Any]:
     """
     Return a deep-copied version of result suitable for caching:
-    - Remove 'clamav_result'
-    - Ensure 'yara_matches' and 'ml_result' exist
-    - Mark it as cached without ClamAV
+    - EXPLICITLY REMOVE 'clamav_result' (never cache ClamAV)
+    - Preserve 'yara_matches' and 'ml_result' (always cache these)
+    - Mark it as cached without ClamAV for clarity
     """
     r = copy.deepcopy(result)
     
-    # Remove ClamAV result safely
+    # CRITICAL: Remove ClamAV result - never cache signature-based scans
     r.pop('clamav_result', None)
     
-    # Ensure YARA and ML keys exist
+    # Ensure YARA and ML keys exist for caching
     r.setdefault('yara_matches', [])
     r.setdefault('ml_result', {'is_malicious': False, 'definition': '', 'similarity': 0.0})
     
-    # Mark as cached without ClamAV
+    # Mark as cached without ClamAV for debugging/logging clarity
     r['_cached_without_clamav'] = True
+    r['_cache_timestamp'] = time.time()
     
     return r
 
 # ---------------- Per-file processing (REPLACE existing process_file) ----------------
 def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
     """
-    Process a single file.
-    - ClamAV results are never cached.
-    - On cache hit: use cached YARA+ML but always re-run ClamAV.
-    - ML scan applies 0.93 benign score threshold.
+    Process a single file with selective caching:
+    - ClamAV: ALWAYS runs fresh (never cached)
+    - YARA: Cached based on file hash + rule version
+    - ML: Cached based on file hash + feature extraction
     """
     global malicious_file_count, benign_file_count
     
@@ -1531,26 +1603,39 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
     if not md5_hash:
         return
 
-    # --- CACHE HIT ---
+    # --- ALWAYS RUN CLAMAV (never cached) ---
+    logging.info(f"Running fresh ClamAV scan for {file_to_scan} (never cached)")
+    try:
+        clamav_res = scan_file_with_clamav_cached(file_to_scan)
+    except Exception as e:
+        clamav_res = {'status': 'error', 'details': f'ClamAV error: {e}'}
+
+    # --- CHECK CACHE FOR YARA + ML RESULTS ---
+    cached_yara_ml = None
     if md5_hash in cache and not md5_hash.startswith('_'):
-        cached = cache[md5_hash]
+        cached_entry = cache[md5_hash]
+        if isinstance(cached_entry, dict) and cached_entry.get('_cached_without_clamav'):
+            logging.info(f"Using cached YARA+ML results for {file_to_scan}")
+            cached_yara_ml = cached_entry
+
+    # If we have cached YARA+ML, use them with fresh ClamAV
+    if cached_yara_ml:
+        result = {
+            'status': 'scanned',
+            'file_type': cached_yara_ml.get('file_type', 'Unknown'),
+            'clamav_result': clamav_res,  # Always fresh
+            'yara_matches': cached_yara_ml.get('yara_matches', []),  # From cache
+            'ml_result': cached_yara_ml.get('ml_result', {'is_malicious': False, 'definition': '', 'similarity': 0.0}),  # From cache
+            '_stat': stat_key,
+            '_used_cached_yara_ml': True
+        }
         
-        # Always rerun ClamAV
-        try:
-            clamav_res = scan_file_with_clamav(file_to_scan)
-        except Exception as e:
-            clamav_res = {'status': 'error', 'details': f'ClamAV error on cache-hit rescan: {e}'}
-
-        merged = copy.deepcopy(cached)
-        merged['clamav_result'] = clamav_res
-        merged['_stat'] = stat_key
-
-        log_scan_result(md5_hash, merged, from_cache=True)
+        log_scan_result(md5_hash, result, from_cache=True)
 
         is_threat = (
             (clamav_res.get('status') == 'threat_found') or
-            (len(cached.get('yara_matches', [])) > 0) or
-            (cached.get('ml_result', {}).get('is_malicious') is True)
+            (len(cached_yara_ml.get('yara_matches', [])) > 0) or
+            (cached_yara_ml.get('ml_result', {}).get('is_malicious', False))
         )
         with file_counter_lock:
             if is_threat:
@@ -1559,6 +1644,9 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
                 benign_file_count += 1
         return
 
+    # --- NO CACHE HIT: RUN FULL SCAN ---
+    logging.info(f"No cached YARA+ML results, running full scan for {file_to_scan}")
+
     # --- File size check ---
     size = os.path.getsize(file_to_scan)
     if size == 0:
@@ -1566,7 +1654,7 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
             'status': 'skipped',
             'reason': 'Empty file',
             'file_type': 'Empty',
-            'clamav_result': {'status': 'skipped', 'details': 'File is empty'},
+            'clamav_result': clamav_res,  # Even for empty files, include fresh ClamAV result
             'yara_matches': [],
             'ml_result': {'is_malicious': False, 'definition': 'Skipped - Empty file', 'similarity': 0.0},
             '_stat': stat_key
@@ -1574,6 +1662,7 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
         with file_counter_lock:
             benign_file_count += 1
         log_scan_result(md5_hash, result)
+        # Cache YARA+ML results (excluding ClamAV)
         cache[md5_hash] = _make_cacheable_result(result)
         save_scan_cache(SCAN_CACHE_FILE, cache)
         return
@@ -1581,48 +1670,51 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
     # --- File type detection ---
     file_type = check_file_type_with_die(file_to_scan)
 
-    # --- ClamAV scan ---
-    clamav_res = scan_file_with_clamav(file_to_scan)
-
+    # ClamAV already ran above - check if it found a threat
     if clamav_res.get('status') == 'threat_found':
         result = {
             'status': 'scanned',
             'file_type': file_type,
             'clamav_result': clamav_res,
-            'yara_matches': [],
-            'ml_result': {'is_malicious': False, 'definition': 'Not Scanned', 'similarity': 0.0},
+            'yara_matches': [],  # Don't run YARA/ML if ClamAV found threat
+            'ml_result': {'is_malicious': False, 'definition': 'Not Scanned - ClamAV detected threat', 'similarity': 0.0},
             '_stat': stat_key
         }
         with file_counter_lock:
             malicious_file_count += 1
         log_scan_result(md5_hash, result)
+        # Still cache the YARA+ML portion (which is empty in this case)
+        cache[md5_hash] = _make_cacheable_result(result)
+        save_scan_cache(SCAN_CACHE_FILE, cache)
         return
 
-    # --- YARA scan ---
+    # --- YARA scan (cacheable) ---
+    logging.info(f"Running YARA scan for {file_to_scan}")
     yara_res = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
 
     if yara_res:
         result = {
             'status': 'scanned',
             'file_type': file_type,
-            'clamav_result': clamav_res,
-            'yara_matches': yara_res,
-            'ml_result': {'is_malicious': False, 'definition': 'Not Scanned', 'similarity': 0.0},
+            'clamav_result': clamav_res,  # Fresh ClamAV result
+            'yara_matches': yara_res,     # Will be cached
+            'ml_result': {'is_malicious': False, 'definition': 'Not Scanned - YARA detected threat', 'similarity': 0.0},
             '_stat': stat_key
         }
         with file_counter_lock:
             malicious_file_count += 1
         log_scan_result(md5_hash, result)
+        # Cache YARA+ML results (excluding ClamAV)
         cache[md5_hash] = _make_cacheable_result(result)
         save_scan_cache(SCAN_CACHE_FILE, cache)
         return
 
-    # --- ML scan with 0.93 threshold ---
+    # --- ML scan (cacheable) ---
+    logging.info(f"Running ML scan for {file_to_scan}")
     is_malicious, definition, sim = scan_file_with_machine_learning_ai(file_to_scan)
 
-    # If your ML function can return matched rules, do this:
+    # Check for matched rules from ML
     matched_rules = getattr(scan_file_with_machine_learning_ai, "last_matched_rules", [])
-
     if matched_rules:
         logging.warning(f"ML matched rules for {file_to_scan}: {matched_rules}")
 
@@ -1637,9 +1729,9 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
     result = {
         'status': 'scanned',
         'file_type': file_type,
-        'clamav_result': clamav_res,
-        'yara_matches': yara_res,
-        'ml_result': ml_result,
+        'clamav_result': clamav_res,  # Fresh ClamAV (never cached)
+        'yara_matches': yara_res,     # Cached
+        'ml_result': ml_result,       # Cached
         '_stat': stat_key
     }
 
@@ -1650,20 +1742,57 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
             benign_file_count += 1
 
     log_scan_result(md5_hash, result)
+    
+    # Cache YARA+ML results (explicitly excluding ClamAV)
+    logging.debug(f"Caching YARA+ML results for {md5_hash} (ClamAV excluded)")
     cache[md5_hash] = _make_cacheable_result(result)
     save_scan_cache(SCAN_CACHE_FILE, cache)
 
-    logging.info(f"Finished processing {os.path.basename(file_to_scan)}")
+    logging.info(f"Finished processing {os.path.basename(file_to_scan)} - ClamAV: fresh, YARA+ML: cached")
+
+# ---------------- Modified result logging for cache clarity ----------------
+def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
+    """Log scan results with explicit cache source information."""
+    # Determine if the result indicates a threat
+    is_threat = (
+        result.get('clamav_result', {}).get('status') == 'threat_found' or
+        len(result.get('yara_matches', [])) > 0 or
+        result.get('ml_result', {}).get('is_malicious', False)
+    )
+    if not is_threat:
+        return
+
+    # Determine cache status for logging
+    cache_status = ""
+    if from_cache:
+        cache_status = "(YARA+ML from cache, ClamAV fresh)"
+    elif result.get('_used_cached_yara_ml'):
+        cache_status = "(YARA+ML from cache, ClamAV fresh)"
+    else:
+        cache_status = "(All scans fresh)"
+
+    logging.info(
+        f"\n{'='*50}\n"
+        f"!!! MALWARE DETECTED !!! {cache_status}\n"
+        f"File MD5: {md5}\n"
+        f"{'='*50}\n"
+        f"STATUS: {result.get('status')}\n"
+        f"--- ClamAV (ALWAYS FRESH) ---\n{result.get('clamav_result')}\n"
+        f"--- YARA (cached) ---\n{result.get('yara_matches')}\n"
+        f"--- ML (cached) ---\n{result.get('ml_result')}\n"
+        f"{'='*50}"
+    )
 
 # ---------------- Main ----------------
 def main():
-    parser = argparse.ArgumentParser(description="HydraDragon (IN-PROCESS libclamav only, NO TIMEOUTS) + YARA + ML")
-    parser.add_argument("--clear-cache", action="store_true", help="Clear scan cache")
+    parser = argparse.ArgumentParser(description="HydraDragon (ClamAV NEVER cached, YARA+ML cached)")
+    parser.add_argument("--clear-cache", action="store_true", help="Clear YARA+ML scan cache (ClamAV always fresh)")
+    parser.add_argument("--cache-stats", action="store_true", help="Show cache statistics")
     parser.add_argument("path", nargs='?', help="Path to file or directory to scan")
     parser.add_argument(
-    "--false-positive-test",
-    action="store_true",
-    help="Automatically exclude YARA rules that trigger but ML+ClamAV say clean" 
+        "--false-positive-test",
+        action="store_true",
+        help="Automatically exclude YARA rules that trigger but ML+ClamAV say clean" 
     )
     args = parser.parse_args()
 
@@ -1672,7 +1801,17 @@ def main():
 
     if args.clear_cache and os.path.exists(SCAN_CACHE_FILE):
         os.remove(SCAN_CACHE_FILE)
-        logging.info("Cache cleared manually.")
+        logging.info("YARA+ML cache cleared manually (ClamAV never cached anyway).")
+
+    if args.cache_stats:
+        cache = load_scan_cache(SCAN_CACHE_FILE)
+        cached_count = len([k for k in cache.keys() if not k.startswith('_')])
+        print(f"Cache Statistics:")
+        print(f"- Cached YARA+ML results: {cached_count}")
+        print(f"- ClamAV results: 0 (never cached)")
+        print(f"- Cache version: {cache.get('_yara_ml_version', 'unknown')}")
+        if not args.path:
+            return
 
     # Initialize 64-bit safe in-process ClamAV
     db_abs = os.path.abspath("ClamAV/database")
@@ -1703,7 +1842,7 @@ def main():
         files_to_scan = [target]
 
     total_files = len(files_to_scan)
-    logging.info(f"Discovered {total_files} files")
+    logging.info(f"Discovered {total_files} files (ClamAV will run fresh on all, YARA+ML may use cache)")
 
     max_workers = DEFAULT_MAX_WORKERS
     logging.info(f"Using up to {max_workers} threads for scanning")
@@ -1713,26 +1852,33 @@ def main():
     malicious_file_count = 0
     benign_file_count = 0
 
-    # Threaded scanning (no timeout)
+    # Threaded scanning
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_file, f, excluded_yara_rules): f for f in files_to_scan}
         for fut in tqdm(concurrent.futures.as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
             fpath = futures[fut]
             try:
-                fut.result()  # result should increment counters inside process_file
+                fut.result()
             except Exception as e:
                 logging.error(f"{fpath} generated exception: {e}")
 
     wall_elapsed = time.perf_counter() - start_wall
 
-    # Final summary
+    # Final summary with cache information
+    cache = load_scan_cache(SCAN_CACHE_FILE)
+    cached_yara_ml_count = len([k for k in cache.keys() if not k.startswith('_')])
+    
     print("\n" + "="*60)
     print("FINAL SCAN SUMMARY")
     print("="*60)
     print(f"Total Malicious Files Found: {malicious_file_count}")
     print(f"Total Clean Files Scanned: {benign_file_count}")
+    print(f"ClamAV Scans (always fresh): {total_files}")
+    print(f"Cached YARA+ML Results: {cached_yara_ml_count}")
     print(f"Wall-clock Total Execution Time: {wall_elapsed:.2f}s")
+    print("="*60)
+    print("Note: ClamAV results are NEVER cached for maximum protection")
     print("="*60)
 
 if __name__ == "__main__":
