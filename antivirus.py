@@ -70,8 +70,7 @@ ML_RESULTS_JSON = os.path.join(BASE_DIR, 'machine_learning', 'results.json')
 SCAN_CACHE_FILE = os.path.join(BASE_DIR, 'scan_cache.json')
 
 # Limits / concurrency
-DEFAULT_MAX_WORKERS = max(2, (os.cpu_count() or 1))
-INPROC_SEMAPHORE = threading.Semaphore(max(1, min(8, DEFAULT_MAX_WORKERS)))  # protect inproc calls if needed
+INPROC_SEMAPHORE = threading.Semaphore(max(1, min(8, (os.cpu_count() or 1))))  # protect inproc calls if needed
 
 # YARA order
 ORDERED_YARA_FILES = [
@@ -1989,8 +1988,7 @@ def main():
     total_files = len(files_to_scan)
     logging.info(f"Discovered {total_files} files (using memory+disk hybrid cache)")
 
-    max_workers = DEFAULT_MAX_WORKERS
-    logging.info(f"Using up to {max_workers} worker processes for scanning")
+    logging.info(f"Using default max worker processes for scanning")
 
     # Initialize counters
     global malicious_file_count, benign_file_count
@@ -1999,7 +1997,7 @@ def main():
 
     # ProcessPoolExecutor (process-based parallel scanning)
     from concurrent.futures import ProcessPoolExecutor, as_completed
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with ProcessPoolExecutor() as executor:
         futures = {executor.submit(process_file, f, excluded_yara_rules): f for f in files_to_scan}
         for fut in tqdm(as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
             fpath = futures[fut]
@@ -2065,3 +2063,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
