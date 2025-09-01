@@ -103,11 +103,9 @@ benign_file_names: List[str] = []
 # Counters
 malicious_file_count = 0
 benign_file_count = 0
-file_counter_lock = threading.Lock()
+threading_lock = threading.Lock()
 
 # Globals for new features
-CACHE_LOCK = threading.Lock()
-FP_LOCK = threading.Lock()
 POTENTIAL_FALSE_POSITIVES: List[Tuple[str, List[str]]] = []
 _global_db_state_hash: Optional[str] = None
 
@@ -356,7 +354,6 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
     yara_x.Scanner objects are not sendable across threads.
     """
     data_content = None
-    results_lock = threading.Lock()
     results = {
         'matched_rules': [],
         'matched_results': []
@@ -400,7 +397,7 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                                 logging.info(f"Rule {rule.identifier} is excluded from {rule_filename}.")
 
                         # Update shared results
-                        with results_lock:
+                        with threading_lock:
                             results['matched_rules'].extend(local_matched_rules)
                             results['matched_results'].extend(local_matched_results)
                     else:
@@ -1485,7 +1482,7 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
     try:
         size = os.path.getsize(file_to_scan)
         if size == 0:
-            with file_counter_lock:
+            with threading_lock:
                 benign_file_count += 1
             logging.info(f"Skipped empty file: {file_to_scan}")
             return
@@ -1503,7 +1500,7 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
     from_cache = False
 
     # --- CACHE CHECK (Thread-safe) ---
-    with CACHE_LOCK:
+    with threading_lock:
         cache = load_scan_cache(SCAN_CACHE_FILE)
         if cache.get('_database_state_hash') != _global_db_state_hash:
             logging.warning(f"Database state changed (was {cache.get('_database_state_hash')}, now {_global_db_state_hash}). Invalidating cache.")
@@ -1544,12 +1541,12 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
 
     # --- False Positive Check ---
     if is_yara_threat and not is_clamav_threat and not is_ml_threat:
-        with FP_LOCK:
+        with threading_lock:
             rules = [match.get('rule', 'UnknownRule') for match in yara_matches]
             POTENTIAL_FALSE_POSITIVES.append((os.path.basename(file_to_scan), rules))
 
     # --- Update Counters ---
-    with file_counter_lock:
+    with threading_lock:
         if is_threat:
             malicious_file_count += 1
         else:
@@ -1575,7 +1572,7 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
             'file_type': file_type,
             '_stat': stat_key
         }
-        with CACHE_LOCK:
+        with threading_lock:
             # Re-load and check hash again to handle race conditions
             cache = load_scan_cache(SCAN_CACHE_FILE)
             if cache.get('_database_state_hash') == _global_db_state_hash:
