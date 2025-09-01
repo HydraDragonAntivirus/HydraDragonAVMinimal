@@ -118,11 +118,11 @@ def log_listener(log_q: queue.Queue):
             print("Error in log listener:", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
 
-def worker_init(log_q: queue.Queue, excluded_rules: Set[str], ml_defs_path: str, yara_rules_path: str):
+def worker_init(log_q: queue.Queue, excluded_rules: Set[str], yara_rules_path: str, ml_data: tuple):
     """
     Initializer for each worker process in the pool.
     - Configures logging to send records to the main process via a queue.
-    - Initializes ClamAV, YARA, and ML models once per process for efficiency.
+    - Initializes ClamAV, YARA, and populates ML models from pre-loaded data.
     """
     # 1. Configure logging for this worker to send to the main process
     h = QueueHandler(log_q)
@@ -137,6 +137,10 @@ def worker_init(log_q: queue.Queue, excluded_rules: Set[str], ml_defs_path: str,
     
     _worker_excluded_rules = excluded_rules
 
+    # Unpack pre-loaded ML data
+    (malicious_numeric_features, malicious_file_names,
+     benign_numeric_features, benign_file_names) = ml_data
+
     # 3. Initialize services
     logging.info(f"Initializing worker PID: {os.getpid()}")
     
@@ -146,9 +150,6 @@ def worker_init(log_q: queue.Queue, excluded_rules: Set[str], ml_defs_path: str,
     
     # Load YARA rules
     preload_yara_rules(yara_rules_path)
-    
-    # Load ML definitions
-    load_ml_definitions(ml_defs_path)
 
 # ---------------- Utility functions ----------------
 def setup_directories():
@@ -243,8 +244,11 @@ def init_inproc_clamav(dbpath: Optional[str] = None, autoreload: bool = True) ->
             raise RuntimeError("Failed to initialize ClamAV engine")
         logging.info(f"Successfully initialized in-process ClamAV Scanner in worker {os.getpid()}.")
     except Exception as e:
+        # This error is now more informative if it happens
         logging.critical(f"Failed to instantiate Scanner in worker {os.getpid()}: {e}")
-        sys.exit(4)
+        # Don't sys.exit here, let the main process handle the worker failure
+        CLAMAV_INPROC = None
+
 
 # ---------------- Scan Wrappers ----------------
 def scan_file_with_clamav(path: str) -> Dict[str, Any]:
@@ -1396,8 +1400,11 @@ def load_ml_definitions(filepath: str) -> bool:
         logging.info(f"[!] Loaded {len(malicious_numeric_features)} malicious and {len(benign_numeric_features)} benign ML definitions (vectors length = {len(malicious_numeric_features[0]) if malicious_numeric_features else 'N/A'}).")
         return True
 
-    except (json.JSONDecodeError, IOError) as e:
-        logging.error(f"Failed to load or parse ML definitions from {filepath}: {e}. ML scanning will be disabled.")
+    except (json.JSONDecodeError, IOError, MemoryError) as e:
+        logging.critical(f"Failed to load or parse ML definitions from {filepath}: {e}. ML scanning will be disabled.")
+        # Clear globals to prevent using stale data
+        malicious_numeric_features, malicious_file_names = [], []
+        benign_numeric_features, benign_file_names = [], []
         return False
 
 # ---------------- Result logging ----------------
@@ -1594,6 +1601,19 @@ def main():
     setup_directories()
     excluded_yara_rules = load_excluded_rules(EXCLUDED_RULES_FILE)
     
+    # --- Pre-load ML definitions ONCE in the main process ---
+    logging.info("Loading Machine Learning definitions...")
+    if not load_ml_definitions(ML_RESULTS_JSON):
+        logging.error("Proceeding without Machine Learning scanning capabilities.")
+    
+    # Package the loaded ML data for the worker initializer
+    ml_data_for_workers = (
+        malicious_numeric_features,
+        malicious_file_names,
+        benign_numeric_features,
+        benign_file_names
+    )
+
     files_to_scan = []
     if os.path.isdir(args.path):
         for root, _, files in os.walk(args.path):
@@ -1617,7 +1637,8 @@ def main():
         shared_cache = manager.dict(load_scan_cache(SCAN_CACHE_FILE))
         cache_lock = manager.Lock()
 
-        init_args = (log_q, excluded_yara_rules, ML_RESULTS_JSON, YARA_RULES_DIR)
+        # Pass the pre-loaded ML data to the workers
+        init_args = (log_q, excluded_yara_rules, YARA_RULES_DIR, ml_data_for_workers)
         
         with ProcessPoolExecutor(max_workers=args.workers, initializer=worker_init, initargs=init_args) as executor:
             futures = {executor.submit(process_file, f, shared_cache, cache_lock): f for f in files_to_scan}
