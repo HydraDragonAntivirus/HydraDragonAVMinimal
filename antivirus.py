@@ -18,8 +18,6 @@ import string
 import multiprocessing
 import threading
 from typing import List, Dict, Any, Optional, Set, Tuple
-import inspect
-import copy
 import numpy as np
 import capstone
 
@@ -1650,7 +1648,7 @@ def main():
     managed_lock = manager.Lock()
     managed_mal_count = manager.Value('i', 0)
     managed_benign_count = manager.Value('i', 0)
-    managed_fp_list = manager.List()
+    managed_fp_list = manager.list()
 
     initargs = (
         managed_lock, managed_mal_count, managed_benign_count, managed_fp_list,
