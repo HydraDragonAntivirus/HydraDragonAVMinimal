@@ -1982,7 +1982,7 @@ def main():
     malicious_file_count = 0
     benign_file_count = 0
 
-    # Process-based parallel scanning (no new helper methods added)
+    # ProcessPoolExecutor (process-based parallel scanning)
     from concurrent.futures import ProcessPoolExecutor, as_completed
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_file, f, excluded_yara_rules): f for f in files_to_scan}
