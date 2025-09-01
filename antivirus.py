@@ -1460,34 +1460,31 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
         f"{'='*50}"
     )
 
-# --- Worker Initializer for ProcessPoolExecutor ---
-def init_worker(db_path, yara_dir, excluded_path):
-    """Initializes globals for each worker process."""
-    global CLAMAV_INPROC, _global_yara_compiled, excluded_yara_rules
-    
-    # This print statement is useful for debugging worker initialization.
-    print(f"Initializing worker process: {os.getpid()}")
-    
-    # Initialize non-shareable resources (these will be process-local)
-    init_inproc_clamav(dbpath=db_path, autoreload=False)
-    preload_yara_rules(yara_dir)
-    
-    # Load excluded rules into a global for the worker
-    excluded_yara_rules = load_excluded_rules(excluded_path)
-
-# ---------------- Per-file processing for Workers ----------------
-def process_file_worker(
-    file_to_scan: str,
-    db_hash: str,
-    mal_features: List[List[float]],
-    mal_names: List[str],
-    ben_features: List[List[float]],
-    ben_names: List[str]
-) -> Tuple[bool, Optional[Tuple[str, List[str]]]]:
+# ---------------- Worker Initializer ----------------
+def worker_init(clamav_db_path, yara_rules_dir, excluded_rules_file, ml_defs_path):
     """
-    Process a single file with robust, thread-safe caching and false-positive detection.
-    This function is executed by worker processes and returns its findings.
-    :return: A tuple (is_threat, potential_fp_info)
+    Runs once per worker to initialize scanners and ML definitions.
+    """
+    global excluded_yara_rules, _global_db_state_hash
+    global mal_features, mal_names, ben_features, ben_names
+
+    # Init ClamAV + YARA once per worker
+    init_inproc_clamav(dbpath=clamav_db_path)
+    preload_yara_rules(yara_rules_dir)
+    excluded_yara_rules = load_excluded_rules(excluded_rules_file)
+
+    # Load ML defs once per worker
+    ml_data = load_ml_definitions(ml_defs_path)
+    if ml_data:
+        mal_features, mal_names, ben_features, ben_names = ml_data
+    else:
+        mal_features, mal_names, ben_features, ben_names = [], [], [], []
+
+
+# ---------------- Per-file Processing ----------------
+def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional[Tuple[str, List[str]]]]:
+    """
+    Process a single file using globals set by worker_init.
     """
     if not os.path.exists(file_to_scan):
         logging.warning(f"File not found: {file_to_scan}")
@@ -1511,33 +1508,29 @@ def process_file_worker(
     cached_data = None
     from_cache = False
 
-    # --- CACHE CHECK (No Lock) ---
+    # --- CACHE CHECK ---
     cache = load_scan_cache(SCAN_CACHE_FILE)
     if cache.get('_database_state_hash') != db_hash:
         logging.warning(f"Database state changed (was {cache.get('_database_state_hash')}, now {db_hash}). Invalidating cache.")
         cache = {'_database_state_hash': db_hash}
-        # Overwrite the old cache with a fresh, empty one immediately
         save_scan_cache(SCAN_CACHE_FILE, cache)
-    
+
     if md5_hash in cache:
         cached_data = cache[md5_hash]
         from_cache = True
 
-    # --- SCANNING ---
-    # ClamAV is always run, its results are never cached.
+    # --- CLAMAV ---
     clamav_res = scan_file_with_clamav(file_to_scan)
 
+    # --- YARA + ML ---
     if from_cache and cached_data:
-        # Use cached YARA and ML results
         yara_matches = cached_data.get('yara_matches', [])
         ml_result = cached_data.get('ml_result', {})
         file_type = cached_data.get('file_type', 'Unknown')
     else:
-        # Perform full scan for YARA and ML
         file_type = check_file_type_with_die(file_to_scan)
         yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
-        
-        # Run ML scan only if other scans are clean to save time
+
         if clamav_res.get('status') != 'threat_found' and not yara_matches:
             is_malicious, definition, sim = scan_file_with_machine_learning_ai(
                 file_to_scan, mal_features, mal_names, ben_features, ben_names
@@ -1546,19 +1539,18 @@ def process_file_worker(
         else:
             ml_result = {'is_malicious': False, 'definition': 'Not Scanned', 'similarity': 0.0}
 
-    # --- RESULT ANALYSIS ---
-    is_clamav_threat = clamav_res.get('status') == 'threat_found'
-    is_yara_threat = len(yara_matches) > 0
-    is_ml_threat = ml_result.get('is_malicious', False)
-    is_threat = is_clamav_threat or is_yara_threat or is_ml_threat
+    # --- FINAL DECISION ---
+    is_threat = (
+        clamav_res.get('status') == 'threat_found'
+        or len(yara_matches) > 0
+        or ml_result.get('is_malicious', False)
+    )
 
-    # --- False Positive Check ---
     potential_fp_info = None
-    if is_yara_threat and not is_clamav_threat and not is_ml_threat:
+    if yara_matches and not is_threat:
         rules = [match.get('rule', 'UnknownRule') for match in yara_matches]
         potential_fp_info = (os.path.basename(file_to_scan), rules)
 
-    # --- Log full result if threat is found ---
     if is_threat:
         final_result = {
             'status': 'threat_found',
@@ -1570,7 +1562,7 @@ def process_file_worker(
         }
         log_scan_result(md5_hash, final_result, from_cache=from_cache)
 
-    # --- CACHE UPDATE (No Lock) ---
+    # --- CACHE UPDATE ---
     if not from_cache:
         cacheable_result = {
             'yara_matches': yara_matches,
@@ -1578,58 +1570,44 @@ def process_file_worker(
             'file_type': file_type,
             '_stat': stat_key
         }
-        # Re-load and check hash again to handle race conditions
         cache = load_scan_cache(SCAN_CACHE_FILE)
         if cache.get('_database_state_hash') == db_hash:
             cache[md5_hash] = cacheable_result
             save_scan_cache(SCAN_CACHE_FILE, cache)
-        else:
-            logging.warning(f"Cache db state changed during scan of {file_to_scan}. Not caching this result.")
-    
+
     logging.info(f"Finished processing {os.path.basename(file_to_scan)}")
     return is_threat, potential_fp_info
 
+
 # ---------------- Main ----------------
 def main():
-    # --- Moved from top level to here ---
     if os.path.exists(local_clamav):
         print(f"Added local ClamAV path to search: {local_clamav}")
 
-    logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s - %(levelname)s - %(message)s',
-                        filename=LOG_FILE,
-                        filemode='w')
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        filename=LOG_FILE,
+        filemode="w"
+    )
     logging.captureWarnings(True)
     print(f"Script starting - detailed log: {LOG_FILE}")
-    # --- End of moved code ---
 
     parser = argparse.ArgumentParser(description="HydraDragon (IN-PROCESS libclamav only, NO TIMEOUTS) + YARA + ML")
     parser.add_argument("--clear-cache", action="store_true", help="Clear scan cache before starting")
-    parser.add_argument("path", nargs='?', help="Path to file or directory to scan")
+    parser.add_argument("path", nargs="?", help="Path to file or directory to scan")
     args = parser.parse_args()
 
-    start_wall = time.perf_counter()
     setup_directories()
 
     if args.clear_cache and os.path.exists(SCAN_CACHE_FILE):
         os.remove(SCAN_CACHE_FILE)
         logging.info("Cache cleared manually.")
 
-    # Main process loads definitions ONLY to get the database hash
-    clamav_db_path = os.path.join(BASE_DIR, 'clamav', 'database')
+    clamav_db_path = os.path.join(BASE_DIR, "clamav", "database")
     global _global_db_state_hash
     _global_db_state_hash = get_database_state_hash(clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON)
     logging.info(f"Current database state hash: {_global_db_state_hash}")
-
-    # MAIN PROCESS LOADS ML DEFINITIONS ONCE
-    logging.info("Loading ML definitions in main process...")
-    ml_data = load_ml_definitions(ML_RESULTS_JSON)
-    if not ml_data:
-        logging.error("ML definitions failed to load. ML scanning will be ineffective.")
-        # Create empty structures to avoid crashing later
-        mal_features, mal_names, ben_features, ben_names = [], [], [], []
-    else:
-        mal_features, mal_names, ben_features, ben_names = ml_data
 
     if not args.path:
         parser.print_help()
@@ -1641,7 +1619,6 @@ def main():
         print(f"ERROR: Target not found: {target}", file=sys.stderr)
         sys.exit(6)
 
-    # Discover files
     files_to_scan: List[str] = []
     if os.path.isdir(target):
         for root, _, files in os.walk(target):
@@ -1653,27 +1630,21 @@ def main():
     total_files = len(files_to_scan)
     logging.info(f"Discovered {total_files} files")
 
-    initargs = (
-        clamav_db_path, YARA_RULES_DIR, EXCLUDED_RULES_FILE
-    )
-
-    # Local accumulators for results
     final_malicious_count = 0
     final_benign_count = 0
     final_fp_list = []
+    start_wall = time.perf_counter()
 
-    with ProcessPoolExecutor(initializer=init_worker, initargs=initargs) as executor:
+    # Workers load everything once
+    with ProcessPoolExecutor(
+        initializer=worker_init,
+        initargs=(clamav_db_path, YARA_RULES_DIR, EXCLUDED_RULES_FILE, ML_RESULTS_JSON)
+    ) as executor:
         futures = {
-            executor.submit(
-                process_file_worker,
-                f,
-                _global_db_state_hash,
-                mal_features,
-                mal_names,
-                ben_features,
-                ben_names
-            ): f for f in files_to_scan
+            executor.submit(process_file_worker, f, _global_db_state_hash): f
+            for f in files_to_scan
         }
+
         for fut in tqdm(as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
             fpath = futures[fut]
             try:
@@ -1682,36 +1653,30 @@ def main():
                     final_malicious_count += 1
                 else:
                     final_benign_count += 1
-                
                 if fp_info:
                     final_fp_list.append(fp_info)
             except Exception as e:
                 logging.error(f"{fpath} generated exception: {e}")
-                final_benign_count += 1 # Count exceptions as non-threats to keep total correct
+                final_benign_count += 1
 
     wall_elapsed = time.perf_counter() - start_wall
 
-    # --- False Positive Report ---
     if final_fp_list:
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("POSSIBLE FALSE POSITIVE REPORT")
         print("The following files matched YARA rules but were found clean by ClamAV and ML.")
-        print("="*60)
+        print("=" * 60)
         for fpath, rules in final_fp_list:
             print(f"FILE: {fpath}")
             for rule in rules:
                 print(f"  - YARA Rule: {rule}")
             print("-" * 20)
 
-    # Final summary
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("FINAL SCAN SUMMARY")
-    print("="*60)
+    print("=" * 60)
     print(f"Total Malicious Files Found: {final_malicious_count}")
     print(f"Total Clean Files Scanned: {final_benign_count}")
     print(f"Total Files Processed: {final_malicious_count + final_benign_count}")
     print(f"Wall-clock Total Execution Time: {wall_elapsed:.2f}s")
-    print("="*60)
-
-if __name__ == "__main__":
-    main()
+    print("=" * 60)
