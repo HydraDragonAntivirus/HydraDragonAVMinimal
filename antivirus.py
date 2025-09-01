@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-HydraDragon - STRICTLY in-process libclamav integration only.
-
-Requires the ClamAV subfolder with clamav.py module.
-If the module or libclamav fails to initialize, the script exits (no fallbacks).
-"""
 
 import os
 import sys
@@ -15,65 +9,41 @@ import time
 import json
 import hashlib
 import string
-import threading
+import inspect
+import subprocess
 from typing import List, Dict, Any, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import capstone
-
-# Add ClamAV subfolder to Python path
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Add local ClamAV folder to DLL search path if it exists
-local_clamav = os.path.join(BASE_DIR, 'clamav')
-if os.path.exists(local_clamav):
-    os.add_dll_directory(local_clamav)
-    current_path = os.environ.get('PATH', '')
-    if local_clamav not in current_path:
-        os.environ['PATH'] = local_clamav + os.pathsep + current_path
-    # This print statement will be moved to main()
-    # print(f"Added local ClamAV path to search: {local_clamav}")
-
-# ---------------- Logging ----------------
-LOG_FILE = 'antivirus.log'
-# Logging configuration will be moved to main() to prevent re-initialization in workers.
-
-# ---------------- Optional third-party flags ----------------
-_have_yara = False
-_have_yara_x = False
-_have_chardet = False
-
-try:
-    import yara
-    _have_yara = True
-except Exception:
-    logging.warning("yara-python not available - YARA scanning disabled.")
-
-try:
-    import yara_x
-    _have_yara_x = True
-except Exception:
-    logging.info("yara_x not available.")
-
-try:
-    import pefile
-    _have_pefile = True
-except Exception:
-    logging.info("pefile not available.")
-
-try:
-    import chardet
-    _have_chardet = True
-except Exception:
-    logging.info("chardet not available; plain-text heuristics will use utf-8 fallback.")
-
+import yara
+import yara_x
+import pefile
+import chardet
 from tqdm import tqdm
+import clamav
+
+script_dir = os.getcwd()
 
 # ---------------- Paths & configuration ----------------
-YARA_RULES_DIR = os.path.join(BASE_DIR, 'yara')
-EXCLUDED_RULES_FILE = os.path.join(BASE_DIR, 'excluded', 'excluded_rules.txt')
-ML_RESULTS_JSON = os.path.join(BASE_DIR, 'machine_learning', 'results.json')
-SCAN_CACHE_FILE = os.path.join(BASE_DIR, 'scan_cache.json')
+LOG_FILE = 'antivirus.log'
+YARA_RULES_DIR = os.path.join(script_dir, 'yara')
+EXCLUDED_RULES_FILE = os.path.join(script_dir, 'excluded', 'excluded_rules.txt')
+ML_RESULTS_JSON = os.path.join(script_dir, 'machine_learning', 'results.json')
+SCAN_CACHE_FILE = os.path.join(script_dir, 'scan_cache.json')
+
+# ClamAV base folder path
+clamav_folder = os.path.join(script_dir, "ClamAV")
+libclamav_path = os.path.join(clamav_folder, "libclamav.dll")
+clamav_database_directory_path = os.path.join(clamav_folder, "database")
+
+detectiteasy_dir = os.path.join(script_dir, "detectiteasy")
+detectiteasy_console_path = os.path.join(detectiteasy_dir, "diec.exe")
+
+# Global cache: md5 -> (die_output, plain_text_flag)
+die_cache: dict[str, tuple[str, bool]] = {}
+
+# Separate cache for "binary-only" DIE results
+binary_die_cache: dict[str, str] = {}
 
 # YARA order
 ORDERED_YARA_FILES = [
@@ -89,27 +59,13 @@ _global_yara_compiled: Dict[str, Any] = {}
 excluded_yara_rules = None
 _global_db_state_hash: Optional[str] = None
 
-
-# ---------------- In-process ClamAV placeholders ----------------
-CLAMAV_INPROC = None  # instance of Scanner
-CLAMAV_MODULE = None  # module object
-
 # ---------------- Utility functions ----------------
-def setup_directories():
-    for d in (YARA_RULES_DIR, os.path.dirname(EXCLUDED_RULES_FILE), os.path.dirname(ML_RESULTS_JSON)):
-        if d and not os.path.exists(d):
-            os.makedirs(d, exist_ok=True)
-
-def calculate_md5(file_path: str) -> str:
+def compute_md5(path: str) -> str:
     h = hashlib.md5()
-    try:
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except Exception as e:
-        logging.error(f"MD5 failed for {file_path}: {e}")
-        return ""
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 def get_database_state_hash(clamav_db_path: str, yara_rules_dir: str, ml_defs_path: str) -> str:
     """Generates a hash representing the state of all signature databases."""
@@ -120,8 +76,7 @@ def get_database_state_hash(clamav_db_path: str, yara_rules_dir: str, ml_defs_pa
     if os.path.isdir(clamav_db_path):
         for root, _, files in os.walk(clamav_db_path):
             for f in files:
-                if f.endswith(('.cvd', '.cld', '.ign2')):
-                    paths_to_check.append(os.path.join(root, f))
+                paths_to_check.append(os.path.join(root, f))
     
     # YARA rules
     if os.path.isdir(yara_rules_dir):
@@ -183,15 +138,12 @@ def preload_yara_rules(rules_dir: str):
             logging.info(f"YARA rule not found (skipping): {rule_filepath}")
             continue
         try:
-            if rule_filename == 'yaraxtr.yrc' and _have_yara_x:
+            if rule_filename == 'yaraxtr.yrc':
                 # pass file object to deserialize_from
                 with open(rule_filepath, "rb") as f:
                     rules = yara_x.Rules.deserialize_from(f)
                     _global_yara_compiled[rule_filename] = rules
             else:
-                if not _have_yara:
-                    logging.warning(f"yara-python not available; cannot load {rule_filename}")
-                    continue
                 # works for precompiled YARA rules
                 compiled = yara.load(rule_filepath)
                 _global_yara_compiled[rule_filename] = compiled
@@ -199,130 +151,160 @@ def preload_yara_rules(rules_dir: str):
         except Exception as e:
             logging.error(f"Failed to preload YARA rule {rule_filename}: {e}")
 
-# ---------------- In-process ClamAV init (STRICT) ----------------
-def init_inproc_clamav(dbpath: Optional[str] = None, autoreload: bool = True) -> None:
+clamav_scanner = clamav.Scanner(libclamav_path=libclamav_path, dbpath=clamav_database_directory_path)
+
+def reload_clamav_database():
     """
-    Strictly require the clamav.py module to be in the same directory as the script.
-    Checks for libclamav.dll and database in a 'clamav' subfolder.
-    On any failure, exit the script - there are NO fallbacks.
+    Reloads the ClamAV engine with the updated database.
+    Required after updating signatures.
     """
-    global CLAMAV_INPROC, CLAMAV_MODULE
-
-    # Check for clamav.py in the script's directory
-    clamav_py_path = os.path.join(BASE_DIR, "clamav.py")
-    if not os.path.exists(clamav_py_path):
-        logging.critical(f"clamav.py not found: {clamav_py_path}")
-        sys.exit(2)
-
-    # Define the path for ClamAV assets (DLLs, database)
-    clamav_assets_dir = os.path.join(BASE_DIR, "clamav")
-    if not os.path.exists(clamav_assets_dir):
-        logging.critical(f"Required 'clamav' subfolder not found: {clamav_assets_dir}")
-        sys.exit(2)
-
-    # Check libclamav.dll
-    libclamav_dll = os.path.join(clamav_assets_dir, "libclamav.dll")
-    if not os.path.exists(libclamav_dll):
-        logging.critical(f"libclamav.dll not found: {libclamav_dll}")
-        sys.exit(2)
-
     try:
-        # The script's directory is automatically in Python's path
-        import clamav as _clamav_pkg
-        CLAMAV_MODULE = _clamav_pkg
-    except Exception as e:
-        logging.critical(f"Cannot import clamav.py: {e}")
-        sys.exit(2)
+        logging.info("Reloading ClamAV database...")
+        clamav_scanner.loadDB()
+        logging.info("ClamAV database reloaded successfully.")
+    except Exception as ex:
+        logging.error(f"Failed to reload ClamAV database: {ex}")
 
-    Scanner = getattr(CLAMAV_MODULE, "Scanner", None)
-    if Scanner is None:
-        logging.critical("ClamAV module does not expose Scanner class")
-        sys.exit(3)
-
-    # Database path default
-    if dbpath is None:
-        dbpath = os.path.join(clamav_assets_dir, "database")
-
-    # Instantiate scanner with DLL path + database path
+def scan_file_with_clamav(file_path):
+    """Scan file using the in-process ClamAV wrapper (scanner) and return virus name or 'Clean'."""
     try:
-        CLAMAV_INPROC = Scanner(libclamav_dll, dbpath=dbpath, autoreload=autoreload)
-        if not CLAMAV_INPROC or not getattr(CLAMAV_INPROC, "engine", None):
-            logging.critical("Failed to initialize ClamAV engine")
-            sys.exit(4)
-    except Exception as e:
-        logging.critical(f"Failed to instantiate Scanner: {e}")
-        sys.exit(4)
+        file_path = os.path.abspath(file_path)
+        ret, virus_name = clamav_scanner.scanFile(file_path)
 
-    logging.info("Successfully initialized in-process ClamAV Scanner.")
-
-# ---------------- Inproc scan wrapper (MODIFIED) ----------------
-def scan_file_with_clamav(path: str) -> Dict[str, Any]:
-    """Scans a file using the high-level clamav.py Scanner instance."""
-    if CLAMAV_INPROC is None:
-        raise RuntimeError("CLAMAV_INPROC Scanner not initialized")
-    
-    if CLAMAV_MODULE is None:
-         raise RuntimeError("CLAMAV_MODULE not initialized")
-
-    try:
-        # Call the high-level scanFile method from the Scanner class
-        ret, virus_name = CLAMAV_INPROC.scanFile(path)
-
-        # Interpret the result and return it in the expected dictionary format
-        if ret == CLAMAV_MODULE.CL_CLEAN:
-            return {'status': 'clean', 'details': 'No threat found.'}
-        elif ret == CLAMAV_MODULE.CL_VIRUS:
-            return {'status': 'threat_found', 'details': virus_name or 'Unknown'}
+        if ret == clamav.CL_CLEAN:
+            return "Clean"
+        elif ret == clamav.CL_VIRUS:
+            return virus_name or "Infected"
         else:
-            # Try to get a descriptive error message
-            try:
-                err_msg = CLAMAV_INPROC.get_error_message(ret)
-            except Exception:
-                err_msg = f"ClamAV error code: {ret}"
-            return {'status': 'error', 'details': err_msg}
-
-    except Exception as e:
-        logging.exception(f"ClamAV scan via wrapper failed for {path}")
-        return {'status': 'error', 'details': str(e)}
+            logging.error(f"Unexpected ClamAV scan result for {file_path}: {ret}")
+            return "Error"
+    except Exception as ex:
+        logging.error(f"Error scanning file {file_path}: {ex}")
+        return "Error"
 
 # ---------------- DIE heuristics & YARA scanning ----------------
-def is_plain_text(data: bytes, null_byte_threshold: float = 0.01, printable_threshold: float = 0.95) -> bool:
+def is_plain_text(data: bytes,
+                  null_byte_threshold: float = 0.01,
+                  printable_threshold: float = 0.95) -> bool:
+    """
+    Heuristic: data is plain text if
+      1. It contains very few null bytes,
+      2. A high fraction of bytes are printable or common whitespace,
+      3. And it decodes cleanly in some text encoding (e.g. UTF-8, Latin-1).
+
+    :param data:       raw file bytes
+    :param null_byte_threshold:
+                       max fraction of bytes that can be zero (0x00)
+    :param printable_threshold:
+                       min fraction of bytes in printable + whitespace set
+    """
     if not data:
         return True
+
+    # 1) Null byte check
     nulls = data.count(0)
     if nulls / len(data) > null_byte_threshold:
         return False
+
+    # 2) Printable char check
     printable = set(bytes(string.printable, 'ascii'))
     count_printable = sum(b in printable for b in data)
     if count_printable / len(data) < printable_threshold:
         return False
-    enc = 'utf-8'
-    if _have_chardet:
-        try:
-            enc = chardet.detect(data).get('encoding') or 'utf-8'
-        except Exception:
-            enc = 'utf-8'
+
+    # 3) Try a text decoding
+    #    Use chardet to guess encoding
+    guess = chardet.detect(data)
+    enc = guess.get('encoding') or 'utf-8'
     try:
         data.decode(enc)
         return True
-    except Exception:
+    except (UnicodeDecodeError, LookupError):
         return False
 
-def check_file_type_with_die(file_path: str) -> str:
+def analyze_file_with_die(file_path):
+    """
+    Runs Detect It Easy (DIE) on the given file once and returns the DIE output (plain text).
+    The output is also saved to a unique .txt file and displayed to the user.
+    """
     try:
-        with open(file_path, 'rb') as f:
-            sample = f.read(4096)
-        if is_plain_text(sample):
-            return "Binary\nFormat: plain text"
-        # if detectit easy not present, return Unknown but continue scanning with ClamAV + YARA + ML
-        return "Unknown"
-    except FileNotFoundError:
-        return "File Not Found"
-    except PermissionError:
-        return "Permission Denied"
-    except Exception as e:
-        logging.error(f"DIE check failed: {e}")
-        return "Unknown"
+        # Run the DIE command once with the -p flag for plain output
+        result = subprocess.run(
+            [detectiteasy_console_path, "-p", file_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="ignore"
+        )
+
+        return result.stdout
+
+    except subprocess.SubprocessError as ex:
+        error_msg = f"Error in {inspect.currentframe().f_code.co_name} while running Detect It Easy for {file_path}: {ex}"
+        logging.error(error_msg)
+        return None
+    except Exception as ex:
+        error_msg = f"General error in {inspect.currentframe().f_code.co_name} while running Detect It Easy for {file_path}: {ex}"
+        logging.error(error_msg)
+        return None
+
+def get_die_output_binary(path: str) -> str:
+    """
+    Returns die_output for a non plain text file, caching by content MD5.
+    (Assumes the file isn't plain text, so always calls analyze_file_with_die()
+     on cache miss.)
+    """
+    file_md5 = compute_md5(path)
+    if file_md5 in binary_die_cache:
+        return binary_die_cache[file_md5]
+
+    # First time for this content: run DIE and cache
+    die_output = analyze_file_with_die(path)
+    binary_die_cache[file_md5] = die_output
+    return die_output
+
+def get_die_output(path: str) -> Tuple[str, bool]:
+    """
+    Returns (die_output, plain_text_flag), caching results by content MD5.
+    Uses get_die_output_binary() if the file is not plain text.
+    """
+    file_md5 = compute_md5(path)
+    if file_md5 in die_cache:
+        return die_cache[file_md5]
+
+    # First time for this content
+    with open(path, "rb") as f:
+        peek = f.read(8192)
+
+    if is_plain_text(peek):
+        die_output = "Binary\n    Format: plain text"
+        plain_text_flag = True
+    else:
+        die_output = get_die_output_binary(path)  # delegate to binary cache
+        plain_text_flag = False  # skip text detection here
+
+    die_cache[file_md5] = (die_output, plain_text_flag)
+    return die_output, plain_text_flag
+
+def is_file_fully_unknown(die_output: str) -> bool:
+    """
+    Determines whether DIE output indicates an unrecognized binary file,
+    ignoring any trailing error messages or extra lines.
+
+    Returns True if the first two non-empty, whitespace-stripped lines are:
+        Binary
+        Unknown: Unknown
+    """
+    if not die_output:
+        logging.info("No DIE output provided.")
+        return False
+
+    # Normalize: split into lines, strip whitespace, drop empty lines
+    lines = [line.strip() for line in die_output.splitlines() if line.strip()]
+
+    # We only care about the first two markers; ignore anything after.
+    if len(lines) >= 2 and lines[0] == "Binary" and lines[1] == "Unknown: Unknown":
+        logging.info("DIE output indicates an unknown file (ignoring extra errors).")
+        return True
+    else:
+        return False
 
 def load_excluded_rules(filepath: str) -> List[str]:
     """
@@ -362,7 +344,7 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
 
         try:
             # --- yara-x mode ---
-            if rule_filename == "yaraxtr.yrc" and _have_yara_x:
+            if rule_filename == "yaraxtr.yrc":
                 if data_content is None:
                     with open(file_path, "rb") as f:
                         data_content = f.read()
@@ -393,9 +375,6 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
 
             # --- yara-python mode ---
             else:
-                if not _have_yara:
-                    continue
-
                 matches = compiled.match(filepath=file_path)
 
                 for m in matches:
@@ -411,6 +390,7 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
 
     return matched_rules
 
+### NEVER CHANGE 100% WORKING PART ###
 # --- PE Analysis and Feature Extraction Functions ---
 
 class PEFeatureExtractor:
@@ -1115,6 +1095,44 @@ def calculate_vector_similarity(vec1: List[float], vec2: List[float]) -> float:
     cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
     return (cosine_similarity + 1) / 2
 
+# Unified cache for all PE feature extractions (replaces both worm_scan_cache and any ML cache)
+unified_pe_cache = {}
+
+def get_cached_pe_features(file_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract and cache PE file numeric features with unified caching.
+    Returns cached features if available, otherwise extracts and caches them.
+    Used by both ML scanning and worm detection.
+    """
+    # Calculate MD5 hash for caching
+    file_md5 = compute_md5(file_path)
+    if not file_md5:
+        return None
+
+    # Check if we already have features for this MD5
+    if file_md5 in unified_pe_cache:
+        logging.debug(f"Using cached features for {file_path} (MD5: {file_md5})")
+        return unified_pe_cache[file_md5]
+
+    try:
+        # Extract numeric features
+        features = pe_extractor.extract_numeric_features(file_path)
+        if features:
+            # Cache the result with MD5 as key
+            unified_pe_cache[file_md5] = features
+            logging.debug(f"Cached features for {file_path} (MD5: {file_md5})")
+            return features
+        else:
+            # Cache negative result too to avoid re-processing failed files
+            unified_pe_cache[file_md5] = None
+            return None
+
+    except Exception as ex:
+        logging.error(f"An error occurred while processing {file_path}: {ex}", exc_info=True)
+        # Cache the failure to avoid repeated attempts
+        unified_pe_cache[file_md5] = None
+        return None
+
 def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
     """Scan a file for malicious activity using machine learning definitions loaded from JSON."""
     malware_definition = "Unknown"
@@ -1416,6 +1434,7 @@ def load_ml_definitions(filepath: str) -> bool:
         logging.error(f"Failed to load or parse ML definitions from {filepath}: {e}. ML scanning will be disabled.")
         return False
 
+## END OF 100% WOKRING PART ### 
 # ---------------- Result logging ----------------
 def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
     # Determine if the result indicates a threat
@@ -1454,7 +1473,6 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
     )
 
 # ---------------- Per-file Processing ----------------
-# ---------------- Per-file Processing ----------------
 def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional[Tuple[str, List[str]]]]:
     """
     Process a single file using globals set in main thread.
@@ -1474,7 +1492,7 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
         logging.error(f"Could not stat file {file_to_scan}: {e}")
         return False, None
 
-    md5_hash = calculate_md5(file_to_scan)
+    md5_hash = compute_md5(file_to_scan)
     if not md5_hash:
         return False, None
 
@@ -1494,9 +1512,11 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     if from_cache and cached_data:
         yara_matches = cached_data.get('yara_matches', [])
         ml_result = cached_data.get('ml_result', {})
-        file_type = cached_data.get('file_type', 'Unknown')
     else:
-        file_type = check_file_type_with_die(file_to_scan)
+        die_output = get_die_output(file_to_scan)
+        file_type = is_file_fully_unknown(die_output)
+        if file_type:
+            return False, None
         yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
 
         if clamav_res.get('status') != 'threat_found' and not yara_matches:
@@ -1522,7 +1542,6 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     if is_threat:
         final_result = {
             'status': 'threat_found',
-            'file_type': file_type,
             'clamav_result': clamav_res,
             'yara_matches': yara_matches,
             'ml_result': ml_result,
@@ -1535,7 +1554,6 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
         cacheable_result = {
             'yara_matches': yara_matches,
             'ml_result': ml_result,
-            'file_type': file_type,
             '_stat': stat_key
         }
         
@@ -1563,10 +1581,6 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
 def main():
     global excluded_yara_rules, _global_db_state_hash
     global mal_features, mal_names, ben_features, ben_names
-
-    if os.path.exists(local_clamav):
-        print(f"Added local ClamAV path to search: {local_clamav}")
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -1581,13 +1595,11 @@ def main():
     parser.add_argument("path", nargs="?", help="Path to file or directory to scan")
     args = parser.parse_args()
 
-    setup_directories()
-
     if args.clear_cache and os.path.exists(SCAN_CACHE_FILE):
         os.remove(SCAN_CACHE_FILE)
         logging.info("Cache cleared manually.")
 
-    clamav_db_path = os.path.join(BASE_DIR, "clamav", "database")
+    clamav_db_path = os.path.join(script_dir, "clamav", "database")
     _global_db_state_hash = get_database_state_hash(clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON)
     logging.info(f"Current database state hash: {_global_db_state_hash}")
 
@@ -1618,7 +1630,6 @@ def main():
     start_wall = time.perf_counter()
 
     # --- ONE-TIME INITIALIZATION (main thread only) ---
-    init_inproc_clamav(dbpath=clamav_db_path, autoreload=True)
     preload_yara_rules(YARA_RULES_DIR)
     excluded_yara_rules = set(load_excluded_rules(EXCLUDED_RULES_FILE))
     
