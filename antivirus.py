@@ -23,6 +23,8 @@ import inspect
 import copy
 import numpy as np
 import capstone
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import Manager, Lock
 
 # --- FIX: Moved setup logic into the main() function ---
 # The code that was here now resides inside the main() function,
@@ -38,25 +40,25 @@ _have_pefile = False
 try:
     import yara
     _have_yara = True
-except Exception:
+except ImportError:
     logging.warning("yara-python not available - YARA scanning disabled.")
 
 try:
     import yara_x
     _have_yara_x = True
-except Exception:
+except ImportError:
     logging.info("yara_x not available.")
 
 try:
     import pefile
     _have_pefile = True
-except Exception:
+except ImportError:
     logging.info("pefile not available.")
 
 try:
     import chardet
     _have_chardet = True
-except Exception:
+except ImportError:
     logging.info("chardet not available; plain-text heuristics will use utf-8 fallback.")
 
 from tqdm import tqdm
@@ -91,6 +93,7 @@ benign_file_names: List[str] = []
 # Counters
 malicious_file_count = 0
 benign_file_count = 0
+# This lock is for thread-safety, for process-safety we will use multiprocessing.Lock
 global_lock = threading.Lock()
 
 # ---------------- In-process ClamAV placeholders ----------------
@@ -1276,7 +1279,7 @@ def load_ml_definitions(filepath: str) -> bool:
             if x is None:
                 return float(default)
             return float(x)
-        except Exception:
+        except (ValueError, TypeError):
             return float(default)
 
     def safe_len(x):
@@ -1295,7 +1298,7 @@ def load_ml_definitions(filepath: str) -> bool:
                     if e is not None:
                         try:
                             entropies.append(float(e))
-                        except Exception:
+                        except (ValueError, TypeError):
                             continue
         except Exception:
             pass
@@ -1314,7 +1317,7 @@ def load_ml_definitions(filepath: str) -> bool:
                     blocks += 1
                     try:
                         total += int(r.get('summary', {}).get('total_entries', 0))
-                    except Exception:
+                    except (ValueError, TypeError):
                         continue
             return total, blocks
         except Exception:
@@ -1395,9 +1398,6 @@ def load_ml_definitions(filepath: str) -> bool:
         cert_info = entry.get("certificates", {}) or {}
         cert_size = to_float(cert_info.get("size", 0))
 
-        # Delay / other counts
-        num_delay_imports = safe_len(delay_imports_list)
-
         # Rich header info (presence)
         rich_header = entry.get("rich_header", {}) or {}
         has_rich = int(bool(rich_header))
@@ -1467,21 +1467,28 @@ def load_ml_definitions(filepath: str) -> bool:
 
         # Malicious section
         malicious_entries = ml_defs.get("malicious", []) or []
-        malicious_numeric_features = []
-        malicious_file_names = []
+        malicious_numeric_features_local = []
+        malicious_file_names_local = []
         for entry in malicious_entries:
             numeric, filename = entry_to_numeric(entry)
-            malicious_numeric_features.append(numeric)
-            malicious_file_names.append(filename)
+            malicious_numeric_features_local.append(numeric)
+            malicious_file_names_local.append(filename)
 
         # Benign section
         benign_entries = ml_defs.get("benign", []) or []
-        benign_numeric_features = []
-        benign_file_names = []
+        benign_numeric_features_local = []
+        benign_file_names_local = []
         for entry in benign_entries:
             numeric, filename = entry_to_numeric(entry)
-            benign_numeric_features.append(numeric)
-            benign_file_names.append(filename)
+            benign_numeric_features_local.append(numeric)
+            benign_file_names_local.append(filename)
+
+        # Safely update globals
+        global malicious_numeric_features, malicious_file_names, benign_numeric_features, benign_file_names
+        malicious_numeric_features = malicious_numeric_features_local
+        malicious_file_names = malicious_file_names_local
+        benign_numeric_features = benign_numeric_features_local
+        benign_file_names = benign_file_names_local
 
         logging.info(f"[!] Loaded {len(malicious_numeric_features)} malicious and {len(benign_numeric_features)} benign ML definitions (vectors length = {len(malicious_numeric_features[0]) if malicious_numeric_features else 'N/A'}).")
         return True
@@ -1572,11 +1579,10 @@ def load_scan_cache(filepath: str) -> Dict[str, Any]:
     
     return {'_clamav_db_version': get_clamav_db_version()}
 
-def save_scan_cache(filepath: str, new_data: Dict[str, Any]):
-    """Thread-safe merge + save of scan cache (preserve old entries)."""
+def save_scan_cache(filepath: str, new_data: Dict[str, Any], lock: Lock):
+    """Process-safe merge + save of scan cache using a multiprocessing Lock."""
     try:
-        with global_lock:  # Lock ensures one writer at a time
-            # Load existing cache if present
+        with lock:
             if os.path.exists(filepath):
                 try:
                     with open(filepath, 'r', encoding='utf-8') as f:
@@ -1587,9 +1593,7 @@ def save_scan_cache(filepath: str, new_data: Dict[str, Any]):
             else:
                 existing = {}
 
-            # Merge new data into existing
-            for k, v in new_data.items():
-                existing[k] = v
+            existing.update(new_data)
 
             # Update metadata
             existing['_clamav_db_version'] = get_clamav_db_version()
@@ -1607,19 +1611,14 @@ def save_scan_cache(filepath: str, new_data: Dict[str, Any]):
     except Exception as e:
         logging.error(f"Could not merge/save cache: {e}")
 
-# ---------------- Modified process_file with hybrid caching ----------------
-def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
+def process_file(file_to_scan: str, excluded_yara_rules: Set[str], shared_cache: dict, cache_lock: Lock) -> Tuple[str, bool]:
     """
-    Process file with hybrid memory+disk caching:
-    - Memory: Fast access during current session
-    - Disk: Persistent across sessions, keeps ALL results
-    - ClamAV: Fresh scan if DB updated, otherwise use cache
+    Processes a single file and returns its MD5 and whether it's a threat.
+    Uses a shared cache dictionary for reading and a lock for writing.
     """
-    global malicious_file_count, benign_file_count
-    
     if not os.path.exists(file_to_scan):
         logging.warning(f"File not found: {file_to_scan}")
-        return
+        return "", False
 
     # --- File stat ---
     try:
@@ -1628,20 +1627,14 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
     except Exception:
         stat_key = None
 
-    # --- Load disk cache ---
-    cache = load_scan_cache(SCAN_CACHE_FILE)
     md5_hash = calculate_md5(file_to_scan)
     if not md5_hash:
-        return
+        return "", False
 
-    # --- Check disk cache ---
-    cached_result = None
+    cached_result = shared_cache.get(md5_hash)
     needs_fresh_clamav = True
     
-    if md5_hash in cache and not md5_hash.startswith('_'):
-        cached_result = cache[md5_hash]
-        
-        # Check if ClamAV result is still valid (same DB version)
+    if cached_result:
         cached_clamav_version = cached_result.get('_clamav_db_version', '')
         current_clamav_version = get_clamav_db_version()
         
@@ -1661,40 +1654,15 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
             'ml_result': {'is_malicious': False, 'definition': 'Skipped - Empty file', 'similarity': 0.0},
             '_stat': stat_key
         }
-        with global_lock:
-            benign_file_count += 1
-        log_scan_result(md5_hash, result)
-        cache[md5_hash] = _make_complete_cacheable_result(result)
-        save_scan_cache(SCAN_CACHE_FILE, cache)
-        return
+        cache_update = {md5_hash: _make_complete_cacheable_result(result)}
+        save_scan_cache(SCAN_CACHE_FILE, cache_update, cache_lock)
+        return md5_hash, False
 
-    # --- Run scans (using hybrid memory+disk cache) ---
+    clamav_res = cached_result['clamav_result'] if not needs_fresh_clamav and cached_result and 'clamav_result' in cached_result else scan_file_with_clamav_hybrid(file_to_scan)
+    yara_res = cached_result['yara_matches'] if cached_result and 'yara_matches' in cached_result else scan_file_with_yara_hybrid(file_to_scan, excluded_yara_rules)
     
-    # ClamAV: Use disk cache unless DB updated, plus memory cache
-    if not needs_fresh_clamav and cached_result and 'clamav_result' in cached_result:
-        clamav_res = cached_result['clamav_result']
-        logging.debug(f"Using disk-cached ClamAV result for {os.path.basename(file_to_scan)}")
-    else:
-        clamav_res = scan_file_with_clamav_hybrid(file_to_scan)
-    
-    # YARA: Use memory cache, then disk cache, then fresh scan
-    if cached_result and 'yara_matches' in cached_result:
-        yara_res = scan_file_with_yara_hybrid(file_to_scan, excluded_yara_rules)
-    else:
-        yara_res = scan_file_with_yara_hybrid(file_to_scan, excluded_yara_rules)
-    
-    # ML: Use memory cache, then disk cache, then fresh scan  
     if cached_result and 'ml_result' in cached_result:
-        # Try memory cache first, fallback to disk cache
-        md5_for_ml = calculate_md5(file_to_scan)
-        if md5_for_ml in _memory_cache_ml:
-            is_malicious, definition, sim = _memory_cache_ml[md5_for_ml]
-            ml_result = {'is_malicious': is_malicious, 'definition': definition, 'similarity': sim}
-        else:
-            # Use disk cached ML result
-            ml_result = cached_result['ml_result']
-            # Also populate memory cache
-            _memory_cache_ml[md5_for_ml] = (ml_result['is_malicious'], ml_result['definition'], ml_result['similarity'])
+        ml_result = cached_result['ml_result']
     else:
         is_malicious, definition, sim = scan_file_with_ml_hybrid(file_to_scan)
         ml_result = {'is_malicious': is_malicious, 'definition': definition, 'similarity': float(sim)}
@@ -1706,16 +1674,11 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
     result = {
         'status': 'scanned',
         'file_type': file_type,
-        'clamav_result': clamav_res,     # KEEP in cache
-        'yara_matches': yara_res,        # KEEP in cache
-        'ml_result': ml_result,          # KEEP in cache
+        'clamav_result': clamav_res,
+        'yara_matches': yara_res,
+        'ml_result': ml_result,
         '_stat': stat_key,
         '_scan_timestamp': time.time(),
-        '_memory_cache_used': {
-            'clamav': md5_hash in _memory_cache_clamav,
-            'yara': md5_hash in _memory_cache_yara,
-            'ml': md5_hash in _memory_cache_ml
-        }
     }
 
     # --- Threat detection and counting ---
@@ -1725,19 +1688,12 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
         ml_result.get('is_malicious', False)
     )
 
-    with global_lock:
-        if is_threat:
-            malicious_file_count += 1
-        else:
-            benign_file_count += 1
-
     log_scan_result(md5_hash, result, from_cache=(cached_result is not None))
 
-    # --- Save complete result to disk (KEEP EVERYTHING) ---
-    cache[md5_hash] = _make_complete_cacheable_result(result)
-    save_scan_cache(SCAN_CACHE_FILE, cache)
-
-    logging.info(f"Finished processing {os.path.basename(file_to_scan)} - All results cached")
+    cache_update = {md5_hash: _make_complete_cacheable_result(result)}
+    save_scan_cache(SCAN_CACHE_FILE, cache_update, cache_lock)
+    
+    return md5_hash, is_threat
 
 # ---------------- Memory cache statistics ----------------
 def get_memory_cache_stats() -> Dict[str, int]:
@@ -1790,43 +1746,18 @@ def collect_false_positive_rules_from_cache(cache_dict, already_excluded=None, m
     rule_counter = Counter()
 
     for key, entry in cache_dict.items():
-        # skip metadata keys in cache
-        if not isinstance(key, str) or key.startswith("_"):
-            continue
-        if not isinstance(entry, dict):
+        if not isinstance(key, str) or key.startswith("_") or not isinstance(entry, dict):
             continue
 
-        yara_matches = entry.get("yara_matches") or []
-        if not yara_matches:
+        if not entry.get("yara_matches") or (entry.get("clamav_result") or {}).get("status") == "threat_found" or (entry.get("ml_result") or {}).get("is_malicious"):
             continue
 
-        # check clamav result
-        clamav = entry.get("clamav_result") or {}
-        clamav_status = str(clamav.get("status", "")).lower()
-        if clamav_status == "threat_found":
-            continue
+        seen_rules_for_file = {_extract_rule_name_from_match(m) for m in entry["yara_matches"]}
+        for rname in seen_rules_for_file:
+            if rname and rname not in already_excluded:
+                rule_counter[rname] += 1
 
-        # check ML
-        ml = entry.get("ml_result") or {}
-        if ml.get("is_malicious", False):
-            continue
-
-        # candidate -> extract rule names (may be list of dicts or strings)
-        seen_rules_for_file = set()
-        for m in yara_matches:
-            rname = _extract_rule_name_from_match(m)
-            if not rname:
-                continue
-            # dedupe per-file so the same rule matching multiple offsets in one file counts once
-            if rname not in already_excluded:
-                seen_rules_for_file.add(rname)
-        for r in seen_rules_for_file:
-            rule_counter[r] += 1
-
-    # apply min_frequency and exclude already_excluded
-    candidates = {r: c for r, c in rule_counter.items() if c >= min_frequency and r not in already_excluded}
-    return Counter(candidates)
-
+    return Counter({r: c for r, c in rule_counter.items() if c >= min_frequency})
 
 def auto_append_excluded_rules(cache_path, excluded_rules_file, backup=True, min_frequency=1):
     """
@@ -1839,12 +1770,7 @@ def auto_append_excluded_rules(cache_path, excluded_rules_file, backup=True, min
         logging.error(f"Failed to load cache for false-positive collection: {e}")
         return [], Counter()
 
-    # load existing excludes (as a set)
-    try:
-        existing = set(load_excluded_rules(excluded_rules_file) or [])
-    except Exception:
-        existing = set()
-
+    existing = set(load_excluded_rules(excluded_rules_file) or [])
     candidates = collect_false_positive_rules_from_cache(cache, already_excluded=existing, min_frequency=min_frequency)
 
     if not candidates:
@@ -1854,11 +1780,10 @@ def auto_append_excluded_rules(cache_path, excluded_rules_file, backup=True, min
     # Prepare list sorted by frequency (descending)
     sorted_candidates = [r for r, _ in candidates.most_common()]
 
-    if backup:
+    if backup and os.path.exists(excluded_rules_file):
         try:
-            if os.path.exists(excluded_rules_file):
-                shutil.copy(excluded_rules_file, excluded_rules_file + ".bak")
-                logging.info(f"Backed up excluded rules to {excluded_rules_file}.bak")
+            shutil.copy(excluded_rules_file, excluded_rules_file + ".bak")
+            logging.info(f"Backed up excluded rules to {excluded_rules_file}.bak")
         except Exception as be:
             logging.warning(f"Could not create backup of excluded rules: {be}")
 
@@ -1868,12 +1793,10 @@ def auto_append_excluded_rules(cache_path, excluded_rules_file, backup=True, min
         os.makedirs(os.path.dirname(excluded_rules_file) or ".", exist_ok=True)
         with open(excluded_rules_file, "a", encoding="utf-8") as fh:
             for rule in sorted_candidates:
-                # double-check not added in the meantime
-                if rule in existing:
-                    continue
-                fh.write(rule.strip() + "\n")
-                added.append(rule)
-                existing.add(rule)
+                if rule not in existing:
+                    fh.write(rule.strip() + "\n")
+                    added.append(rule)
+                    existing.add(rule)
         logging.info(f"Appended {len(added)} rules to {excluded_rules_file}")
     except Exception as e:
         logging.error(f"Failed to write excluded rules file: {e}")
@@ -1909,16 +1832,12 @@ def main():
     print(f"Script starting - detailed log: {LOG_FILE}")
     # --- End of moved logic ---
 
-    parser = argparse.ArgumentParser(description="HydraDragon with Memory+Disk Caching (All results preserved)")
+    parser = argparse.ArgumentParser(description="HydraDragon with Memory+Disk Caching")
     parser.add_argument("--clear-cache", action="store_true", help="Clear disk scan cache")
     parser.add_argument("--clear-memory", action="store_true", help="Clear in-memory caches")
     parser.add_argument("--cache-stats", action="store_true", help="Show cache statistics")
     parser.add_argument("path", nargs='?', help="Path to file or directory to scan")
-    parser.add_argument(
-        "--false-positive-test",
-        action="store_true",
-        help="Automatically exclude YARA rules that trigger but ML+ClamAV say clean"
-    )
+    parser.add_argument("--false-positive-test", action="store_true", help="Automatically exclude YARA rules that trigger but ML+ClamAV say clean")
     args = parser.parse_args()
 
     start_wall = time.perf_counter()
@@ -1936,15 +1855,9 @@ def main():
         cache = load_scan_cache(SCAN_CACHE_FILE)
         memory_stats = get_memory_cache_stats()
         disk_cached_count = len([k for k in cache.keys() if not k.startswith('_')])
-
-        print(f"Cache Statistics:")
-        print(f"Disk Cache:")
-        print(f"  - Total cached results: {disk_cached_count}")
-        print(f"  - ClamAV DB version: {cache.get('_clamav_db_version', 'unknown')}")
-        print(f"Memory Cache (current session):")
-        print(f"  - ClamAV results: {memory_stats['clamav_memory_cache']}")
-        print(f"  - YARA results: {memory_stats['yara_memory_cache']}")
-        print(f"  - ML results: {memory_stats['ml_memory_cache']}")
+        print("Cache Statistics:")
+        print(f"  - Disk Cache: {disk_cached_count} entries")
+        print(f"  - Memory Cache (ClamAV/YARA/ML): {memory_stats['clamav_memory_cache']}/{memory_stats['yara_memory_cache']}/{memory_stats['ml_memory_cache']}")
         if not args.path:
             return
 
@@ -1968,17 +1881,15 @@ def main():
     target = args.path
     if not os.path.exists(target):
         logging.critical(f"Target not found: {target}")
-        print(f"ERROR: Target not found: {target}", file=sys.stderr)
         sys.exit(6)
 
-    # Discover files
-    files_to_scan: List[str] = []
+    files_to_scan = []
     if os.path.isdir(target):
         for root, _, files in os.walk(target):
             for fname in files:
                 try:
                     full_path = os.path.join(root, fname)
-                    if os.path.exists(full_path): # Check for broken symlinks
+                    if os.path.isfile(full_path):
                          files_to_scan.append(full_path)
                 except Exception as e:
                     logging.warning(f"Could not access file {fname} in {root}: {e}")
@@ -1986,81 +1897,45 @@ def main():
         files_to_scan = [target]
 
     total_files = len(files_to_scan)
-    logging.info(f"Discovered {total_files} files (using memory+disk hybrid cache)")
+    logging.info(f"Discovered {total_files} files")
 
-    logging.info(f"Using default max worker processes for scanning")
+    malicious_count = 0
+    benign_count = 0
 
-    # Initialize counters
-    global malicious_file_count, benign_file_count
-    malicious_file_count = 0
-    benign_file_count = 0
+    with Manager() as manager:
+        shared_cache = manager.dict(load_scan_cache(SCAN_CACHE_FILE))
+        cache_lock = manager.Lock()
 
-    # ProcessPoolExecutor (process-based parallel scanning)
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-    with ProcessPoolExecutor() as executor:
-        futures = {executor.submit(process_file, f, excluded_yara_rules): f for f in files_to_scan}
-        for fut in tqdm(as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
-            fpath = futures[fut]
-            try:
-                # The result from process_file is not directly used here,
-                # as counters are updated via global lock within the function
-                # and results are saved to a cache file.
-                fut.result()
-            except Exception as e:
-                logging.error(f"{fpath} generated exception during execution: {e}", exc_info=True)
-                continue
+        with ProcessPoolExecutor() as executor:
+            futures = {executor.submit(process_file, f, excluded_yara_rules, shared_cache, cache_lock): f for f in files_to_scan}
+            
+            for fut in tqdm(as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
+                try:
+                    _, is_threat = fut.result()
+                    if is_threat:
+                        malicious_count += 1
+                    else:
+                        benign_count += 1
+                except Exception as e:
+                    logging.error(f"A file scan generated an exception: {e}", exc_info=True)
 
     wall_elapsed = time.perf_counter() - start_wall
 
-    # Final summary with detailed cache information
-    cache = load_scan_cache(SCAN_CACHE_FILE)
-    memory_stats = get_memory_cache_stats()
-    disk_cached_count = len([k for k in cache.keys() if not k.startswith('_')])
-
     print("\n" + "="*60)
     print("FINAL SCAN SUMMARY")
+    print(f"Total Malicious Files: {malicious_count}")
+    print(f"Total Clean Files: {benign_count}")
+    print(f"Execution Time: {wall_elapsed:.2f}s")
     print("="*60)
-    print(f"Total Malicious Files Found: {malicious_file_count}")
-    print(f"Total Clean Files Scanned: {benign_file_count}")
-    print(f"Wall-clock Total Execution Time: {wall_elapsed:.2f}s")
-    print(f"")
-    print(f"Cache Performance:")
-    print(f"  Disk Cache Entries: {disk_cached_count}")
-    print(f"  Memory Cache Hits - ClamAV: {memory_stats['clamav_memory_cache']}")
-    print(f"  Memory Cache Hits - YARA: {memory_stats['yara_memory_cache']}")
-    print(f"  Memory Cache Hits - ML: {memory_stats['ml_memory_cache']}")
-    print(f"  ClamAV DB Version: {get_clamav_db_version()}")
-    print("="*60)
-    print("Cache Policy: Memory+Disk hybrid, ClamAV resets on DB update")
-    print("="*60)
-
-    # ----------------- Auto false-positive exclusion (optional) -----------------
+    
     if args.false_positive_test:
-        print("\n-- Auto false-positive test enabled: collecting candidate YARA rules to exclude --")
-        # choose min_frequency accordingly; set to 1 for immediate behavior,
-        # or bump to 2/3 to require repeats.
-        min_freq = 1
-        added_rules, candidates = auto_append_excluded_rules(SCAN_CACHE_FILE, EXCLUDED_RULES_FILE, backup=True, min_frequency=min_freq)
-        if added_rules:
-            print(f"Auto-excluded {len(added_rules)} YARA rules (appended to {EXCLUDED_RULES_FILE}):")
-            for r in added_rules:
-                print(f"  - {r}")
+        print("\n-- Running auto false-positive test --")
+        added, candidates = auto_append_excluded_rules(SCAN_CACHE_FILE, EXCLUDED_RULES_FILE)
+        if added:
+            print(f"Auto-excluded {len(added)} YARA rules.")
         else:
-            if candidates:
-                # candidates found but none added (e.g., they were already excluded)
-                print("Found candidate rules but none were added (already excluded or below frequency threshold).")
-                # Optionally list candidate counts for dry visibility
-                print("\nCandidate rule frequencies (not added):")
-                for r, c in candidates.most_common():
-                    print(f"  {r}: {c}")
-            else:
-                print("No candidate rules found for auto-exclusion.")
-    # -------------------------------------------------------------------------
-
-    # keep final delimiter
-    print("="*60)
+            print("No new rules to auto-exclude.")
 
 
 if __name__ == "__main__":
     main()
-
