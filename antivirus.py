@@ -424,7 +424,6 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
     yara_x.Scanner objects are not sendable across threads.
     """
     data_content = None
-    results_lock = threading.Lock()
     results = {
         'matched_rules': [],
         'matched_results': []
@@ -466,7 +465,7 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                                 local_matched_results.append(match_details)
 
                         # Update shared results
-                        with results_lock:
+                        with global_lock:
                             results['matched_rules'].extend(local_matched_rules)
                             results['matched_results'].extend(local_matched_results)
                     else:
@@ -1588,7 +1587,7 @@ def load_scan_cache(filepath: str) -> Dict[str, Any]:
 def save_scan_cache(filepath: str, new_data: Dict[str, Any]):
     """Thread-safe merge + save of scan cache (preserve old entries)."""
     try:
-        with cache_file_lock:  # Lock ensures one writer at a time
+        with global_lock:  # Lock ensures one writer at a time
             # Load existing cache if present
             if os.path.exists(filepath):
                 try:
