@@ -79,10 +79,6 @@ EXCLUDED_RULES_FILE = os.path.join(BASE_DIR, 'excluded', 'excluded_rules.txt')
 ML_RESULTS_JSON = os.path.join(BASE_DIR, 'machine_learning', 'results.json')
 SCAN_CACHE_FILE = os.path.join(BASE_DIR, 'scan_cache.json')
 
-# Limits / concurrency
-DEFAULT_MAX_WORKERS = max(2, (os.cpu_count() or 1))
-INPROC_SEMAPHORE = threading.Semaphore(max(1, min(8, DEFAULT_MAX_WORKERS)))  # protect inproc calls if needed
-
 # YARA order
 ORDERED_YARA_FILES = [
     'yaraxtr.yrc',
@@ -93,16 +89,8 @@ ORDERED_YARA_FILES = [
 ]
 _global_yara_compiled: Dict[str, Any] = {}
 
-# ML globals
-malicious_numeric_features: List[List[float]] = []
-malicious_file_names: List[str] = []
-benign_numeric_features: List[List[float]] = []
-benign_file_names: List[str] = []
-
 # Globals for worker processes
-worker_lock = None
 excluded_yara_rules = None
-
 _global_db_state_hash: Optional[str] = None
 
 
@@ -1136,8 +1124,15 @@ def calculate_vector_similarity(vec1: List[float], vec2: List[float]) -> float:
     cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
     return (cosine_similarity + 1) / 2
 
-def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
-    """Scan a file for malicious activity using machine learning definitions loaded from JSON."""
+def scan_file_with_machine_learning_ai(
+    file_path: str,
+    mal_features: List[List[float]],
+    mal_names: List[str],
+    ben_features: List[List[float]],
+    ben_names: List[str],
+    threshold=0.86
+) -> Tuple[bool, str, float]:
+    """Scan a file for malicious activity using machine learning definitions passed as arguments."""
     malware_definition = "Unknown"
     logging.info(f"Starting machine learning scan for file: {file_path}")
 
@@ -1145,18 +1140,30 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
         pe = pefile.PE(file_path)
         pe.close()
     except pefile.PEFormatError:
-        return False, malware_definition, 0
+        return False, malware_definition, 0.0
 
-    file_numeric_features = pe_extractor.extract_numeric_features(file_path)
-    if not file_numeric_features:
-        return False, "Feature-Extraction-Failed", 0
+    file_numeric_features_dict = pe_extractor.extract_numeric_features(file_path)
+    if not file_numeric_features_dict:
+        return False, "Feature-Extraction-Failed", 0.0
+
+    # The ML loading function now returns a tuple of lists, one of which is the numeric features
+    # We need to ensure that the feature extraction here produces a list in the same order.
+    # The `load_ml_definitions` function has an `entry_to_numeric` helper that defines this order.
+    # We need to replicate that process here for the file being scanned.
+    # For simplicity, let's create a temporary dict structure similar to what `entry_to_numeric` expects.
+    
+    temp_entry_for_conversion = {"file_info": {"filename": os.path.basename(file_path)}}
+    temp_entry_for_conversion.update(file_numeric_features_dict)
+    
+    file_numeric_features, _ = load_ml_definitions.entry_to_numeric(temp_entry_for_conversion)
+
 
     is_malicious_ml = False
-    nearest_malicious_similarity = 0
-    nearest_benign_similarity = 0
+    nearest_malicious_similarity = 0.0
+    nearest_benign_similarity = 0.0
 
     # Check malicious definitions
-    for ml_feats, info in zip(malicious_numeric_features, malicious_file_names):
+    for ml_feats, info in zip(mal_features, mal_names):
         similarity = calculate_vector_similarity(file_numeric_features, ml_feats)
         nearest_malicious_similarity = max(nearest_malicious_similarity, similarity)
 
@@ -1178,7 +1185,7 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
 
     # If not malicious, check benign
     if not is_malicious_ml:
-        for ml_feats, info in zip(benign_numeric_features, benign_file_names):
+        for ml_feats, info in zip(ben_features, ben_names):
             similarity = calculate_vector_similarity(file_numeric_features, ml_feats)
             nearest_benign_similarity = max(nearest_benign_similarity, similarity)
 
@@ -1205,15 +1212,12 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
 
 # Load ML definitions
 
-def load_ml_definitions(filepath: str) -> bool:
+def load_ml_definitions(filepath: str) -> Optional[Tuple[List, List, List, List]]:
     """
-    Load ML definitions from a JSON file and populate global numeric feature lists.
+    Load ML definitions from a JSON file and returns them as tuples of lists.
     This version understands the extended feature set produced by PEFeatureExtractor
-    (section_disassembly, section_characteristics, overlay size, relocations, TLS callbacks, etc.)
     and is defensive about missing or unexpected types.
     """
-    global malicious_numeric_features, malicious_file_names, benign_numeric_features, benign_file_names
-
     def to_float(x, default=0.0):
         try:
             if x is None:
@@ -1398,11 +1402,14 @@ def load_ml_definitions(filepath: str) -> bool:
 
         filename = (entry.get("file_info", {}) or {}).get("filename", "unknown")
         return numeric, filename
+    
+    # Attach the helper function to the main function so it can be used elsewhere
+    load_ml_definitions.entry_to_numeric = entry_to_numeric
 
     # --- main loader body ---
     if not os.path.exists(filepath):
         logging.error(f"Machine learning definitions file not found: {filepath}. ML scanning will be disabled.")
-        return False
+        return None
 
     try:
         with open(filepath, 'r', encoding='utf-8-sig') as results_file:
@@ -1427,11 +1434,11 @@ def load_ml_definitions(filepath: str) -> bool:
             benign_file_names.append(filename)
 
         logging.info(f"[!] Loaded {len(malicious_numeric_features)} malicious and {len(benign_numeric_features)} benign ML definitions (vectors length = {len(malicious_numeric_features[0]) if malicious_numeric_features else 'N/A'}).")
-        return True
+        return (malicious_numeric_features, malicious_file_names, benign_numeric_features, benign_file_names)
 
     except (json.JSONDecodeError, IOError) as e:
         logging.error(f"Failed to load or parse ML definitions from {filepath}: {e}. ML scanning will be disabled.")
-        return False
+        return None
 
 # ---------------- Result logging ----------------
 def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
@@ -1458,25 +1465,28 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
     )
 
 # --- Worker Initializer for ProcessPoolExecutor ---
-def init_worker(lock, db_path, yara_dir, ml_path, excluded_path):
+def init_worker(db_path, yara_dir, excluded_path):
     """Initializes globals for each worker process."""
-    global worker_lock, CLAMAV_INPROC, _global_yara_compiled, excluded_yara_rules
+    global CLAMAV_INPROC, _global_yara_compiled, excluded_yara_rules
     
     print(f"Initializing worker process: {os.getpid()}")
     
-    # Set shared lock as a global for this worker
-    worker_lock = lock
-
     # Initialize non-shareable resources (these will be process-local)
     init_inproc_clamav(dbpath=db_path, autoreload=False)
     preload_yara_rules(yara_dir)
-    load_ml_definitions(ml_path)
     
     # Load excluded rules into a global for the worker
     excluded_yara_rules = load_excluded_rules(excluded_path)
 
 # ---------------- Per-file processing for Workers ----------------
-def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional[Tuple[str, List[str]]]]:
+def process_file_worker(
+    file_to_scan: str,
+    db_hash: str,
+    mal_features: List[List[float]],
+    mal_names: List[str],
+    ben_features: List[List[float]],
+    ben_names: List[str]
+) -> Tuple[bool, Optional[Tuple[str, List[str]]]]:
     """
     Process a single file with robust, thread-safe caching and false-positive detection.
     This function is executed by worker processes and returns its findings.
@@ -1504,18 +1514,17 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     cached_data = None
     from_cache = False
 
-    # --- CACHE CHECK (Thread-safe) ---
-    with worker_lock:
-        cache = load_scan_cache(SCAN_CACHE_FILE)
-        if cache.get('_database_state_hash') != db_hash:
-            logging.warning(f"Database state changed (was {cache.get('_database_state_hash')}, now {db_hash}). Invalidating cache.")
-            cache = {'_database_state_hash': db_hash}
-            # Overwrite the old cache with a fresh, empty one immediately
-            save_scan_cache(SCAN_CACHE_FILE, cache)
-        
-        if md5_hash in cache:
-            cached_data = cache[md5_hash]
-            from_cache = True
+    # --- CACHE CHECK (No Lock) ---
+    cache = load_scan_cache(SCAN_CACHE_FILE)
+    if cache.get('_database_state_hash') != db_hash:
+        logging.warning(f"Database state changed (was {cache.get('_database_state_hash')}, now {db_hash}). Invalidating cache.")
+        cache = {'_database_state_hash': db_hash}
+        # Overwrite the old cache with a fresh, empty one immediately
+        save_scan_cache(SCAN_CACHE_FILE, cache)
+    
+    if md5_hash in cache:
+        cached_data = cache[md5_hash]
+        from_cache = True
 
     # --- SCANNING ---
     # ClamAV is always run, its results are never cached.
@@ -1533,7 +1542,9 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
         
         # Run ML scan only if other scans are clean to save time
         if clamav_res.get('status') != 'threat_found' and not yara_matches:
-            is_malicious, definition, sim = scan_file_with_machine_learning_ai(file_to_scan)
+            is_malicious, definition, sim = scan_file_with_machine_learning_ai(
+                file_to_scan, mal_features, mal_names, ben_features, ben_names
+            )
             ml_result = {'is_malicious': is_malicious, 'definition': definition, 'similarity': float(sim)}
         else:
             ml_result = {'is_malicious': False, 'definition': 'Not Scanned', 'similarity': 0.0}
@@ -1562,7 +1573,7 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
         }
         log_scan_result(md5_hash, final_result, from_cache=from_cache)
 
-    # --- CACHE UPDATE (Thread-safe) ---
+    # --- CACHE UPDATE (No Lock) ---
     if not from_cache:
         cacheable_result = {
             'yara_matches': yara_matches,
@@ -1570,14 +1581,13 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
             'file_type': file_type,
             '_stat': stat_key
         }
-        with worker_lock:
-            # Re-load and check hash again to handle race conditions
-            cache = load_scan_cache(SCAN_CACHE_FILE)
-            if cache.get('_database_state_hash') == db_hash:
-                cache[md5_hash] = cacheable_result
-                save_scan_cache(SCAN_CACHE_FILE, cache)
-            else:
-                logging.warning(f"Cache db state changed during scan of {file_to_scan}. Not caching this result.")
+        # Re-load and check hash again to handle race conditions
+        cache = load_scan_cache(SCAN_CACHE_FILE)
+        if cache.get('_database_state_hash') == db_hash:
+            cache[md5_hash] = cacheable_result
+            save_scan_cache(SCAN_CACHE_FILE, cache)
+        else:
+            logging.warning(f"Cache db state changed during scan of {file_to_scan}. Not caching this result.")
     
     logging.info(f"Finished processing {os.path.basename(file_to_scan)}")
     return is_threat, potential_fp_info
@@ -1602,6 +1612,16 @@ def main():
     _global_db_state_hash = get_database_state_hash(clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON)
     logging.info(f"Current database state hash: {_global_db_state_hash}")
 
+    # MAIN PROCESS LOADS ML DEFINITIONS ONCE
+    logging.info("Loading ML definitions in main process...")
+    ml_data = load_ml_definitions(ML_RESULTS_JSON)
+    if not ml_data:
+        logging.error("ML definitions failed to load. ML scanning will be ineffective.")
+        # Create empty structures to avoid crashing later
+        mal_features, mal_names, ben_features, ben_names = [], [], [], []
+    else:
+        mal_features, mal_names, ben_features, ben_names = ml_data
+
     if not args.path:
         parser.print_help()
         sys.exit(0)
@@ -1624,18 +1644,13 @@ def main():
     total_files = len(files_to_scan)
     logging.info(f"Discovered {total_files} files")
 
-    max_workers = DEFAULT_MAX_WORKERS
-    logging.info(f"Using up to {max_workers} processes for scanning")
+    logging.info("Using ProcessPoolExecutor with default worker count (up to CPU count)")
 
     # --- Process Pool Execution ---
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
-    # Create a lock to be shared with worker processes for file cache access
-    process_lock = multiprocessing.Lock()
-
     initargs = (
-        process_lock,
-        clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON, EXCLUDED_RULES_FILE
+        clamav_db_path, YARA_RULES_DIR, EXCLUDED_RULES_FILE
     )
 
     # Local accumulators for results
@@ -1643,8 +1658,18 @@ def main():
     final_benign_count = 0
     final_fp_list = []
 
-    with ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker, initargs=initargs) as executor:
-        futures = {executor.submit(process_file_worker, f, _global_db_state_hash): f for f in files_to_scan}
+    with ProcessPoolExecutor(initializer=init_worker, initargs=initargs) as executor:
+        futures = {
+            executor.submit(
+                process_file_worker,
+                f,
+                _global_db_state_hash,
+                mal_features,
+                mal_names,
+                ben_features,
+                ben_names
+            ): f for f in files_to_scan
+        }
         for fut in tqdm(as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
             fpath = futures[fut]
             try:
