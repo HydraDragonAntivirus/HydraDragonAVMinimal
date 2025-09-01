@@ -99,10 +99,7 @@ malicious_file_names: List[str] = []
 benign_numeric_features: List[List[float]] = []
 benign_file_names: List[str] = []
 
-# These will be replaced by managed objects for multiprocessing
-malicious_file_count = None
-benign_file_count = None
-POTENTIAL_FALSE_POSITIVES = None
+# Globals for worker processes
 worker_lock = None
 excluded_yara_rules = None
 
@@ -1461,18 +1458,14 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
     )
 
 # --- Worker Initializer for ProcessPoolExecutor ---
-def init_worker(lock, mal_count, benign_count, fp_list, db_path, yara_dir, ml_path, excluded_path):
+def init_worker(lock, db_path, yara_dir, ml_path, excluded_path):
     """Initializes globals for each worker process."""
-    global worker_lock, malicious_file_count, benign_file_count, POTENTIAL_FALSE_POSITIVES
-    global CLAMAV_INPROC, _global_yara_compiled, excluded_yara_rules
+    global worker_lock, CLAMAV_INPROC, _global_yara_compiled, excluded_yara_rules
     
     print(f"Initializing worker process: {os.getpid()}")
     
-    # Set shared managed objects as globals for this worker
+    # Set shared lock as a global for this worker
     worker_lock = lock
-    malicious_file_count = mal_count
-    benign_file_count = benign_count
-    POTENTIAL_FALSE_POSITIVES = fp_list
 
     # Initialize non-shareable resources (these will be process-local)
     init_inproc_clamav(dbpath=db_path, autoreload=False)
@@ -1483,31 +1476,30 @@ def init_worker(lock, mal_count, benign_count, fp_list, db_path, yara_dir, ml_pa
     excluded_yara_rules = load_excluded_rules(excluded_path)
 
 # ---------------- Per-file processing for Workers ----------------
-def process_file_worker(file_to_scan: str, db_hash: str):
+def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional[Tuple[str, List[str]]]]:
     """
     Process a single file with robust, thread-safe caching and false-positive detection.
-    This function is executed by worker processes.
+    This function is executed by worker processes and returns its findings.
+    :return: A tuple (is_threat, potential_fp_info)
     """
     if not os.path.exists(file_to_scan):
         logging.warning(f"File not found: {file_to_scan}")
-        return
+        return False, None
 
     try:
         size = os.path.getsize(file_to_scan)
         if size == 0:
-            with worker_lock:
-                benign_file_count.value += 1
             logging.info(f"Skipped empty file: {file_to_scan}")
-            return
+            return False, None
         st = os.stat(file_to_scan)
         stat_key = f"{st.st_size}:{st.st_mtime_ns}"
     except Exception as e:
         logging.error(f"Could not stat file {file_to_scan}: {e}")
-        return
+        return False, None
 
     md5_hash = calculate_md5(file_to_scan)
     if not md5_hash:
-        return
+        return False, None
 
     cached_data = None
     from_cache = False
@@ -1553,17 +1545,10 @@ def process_file_worker(file_to_scan: str, db_hash: str):
     is_threat = is_clamav_threat or is_yara_threat or is_ml_threat
 
     # --- False Positive Check ---
+    potential_fp_info = None
     if is_yara_threat and not is_clamav_threat and not is_ml_threat:
-        with worker_lock:
-            rules = [match.get('rule', 'UnknownRule') for match in yara_matches]
-            POTENTIAL_FALSE_POSITIVES.append((os.path.basename(file_to_scan), rules))
-
-    # --- Update Counters ---
-    with worker_lock:
-        if is_threat:
-            malicious_file_count.value += 1
-        else:
-            benign_file_count.value += 1
+        rules = [match.get('rule', 'UnknownRule') for match in yara_matches]
+        potential_fp_info = (os.path.basename(file_to_scan), rules)
 
     # --- Log full result if threat is found ---
     if is_threat:
@@ -1595,6 +1580,7 @@ def process_file_worker(file_to_scan: str, db_hash: str):
                 logging.warning(f"Cache db state changed during scan of {file_to_scan}. Not caching this result.")
     
     logging.info(f"Finished processing {os.path.basename(file_to_scan)}")
+    return is_threat, potential_fp_info
 
 # ---------------- Main ----------------
 def main():
@@ -1644,32 +1630,37 @@ def main():
     # --- Process Pool Execution ---
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
-    manager = multiprocessing.Manager()
-    managed_lock = manager.Lock()
-    managed_mal_count = manager.Value('i', 0)
-    managed_benign_count = manager.Value('i', 0)
-    managed_fp_list = manager.list()
+    # Create a lock to be shared with worker processes for file cache access
+    process_lock = multiprocessing.Lock()
 
     initargs = (
-        managed_lock, managed_mal_count, managed_benign_count, managed_fp_list,
+        process_lock,
         clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON, EXCLUDED_RULES_FILE
     )
+
+    # Local accumulators for results
+    final_malicious_count = 0
+    final_benign_count = 0
+    final_fp_list = []
 
     with ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker, initargs=initargs) as executor:
         futures = {executor.submit(process_file_worker, f, _global_db_state_hash): f for f in files_to_scan}
         for fut in tqdm(as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
             fpath = futures[fut]
             try:
-                fut.result()
+                is_threat, fp_info = fut.result()
+                if is_threat:
+                    final_malicious_count += 1
+                else:
+                    final_benign_count += 1
+                
+                if fp_info:
+                    final_fp_list.append(fp_info)
             except Exception as e:
                 logging.error(f"{fpath} generated exception: {e}")
+                final_benign_count += 1 # Count exceptions as non-threats to keep total correct
 
     wall_elapsed = time.perf_counter() - start_wall
-
-    # Retrieve results from managed objects
-    final_malicious_count = managed_mal_count.value
-    final_benign_count = managed_benign_count.value
-    final_fp_list = list(managed_fp_list)
 
     # --- False Positive Report ---
     if final_fp_list:
