@@ -22,7 +22,7 @@ import pefile
 import chardet
 from tqdm import tqdm
 import clamav
-from clamav import script_dir
+from hydralogvalues import script_dir, log_values
 
 thread_lock = threading.Lock()
 
