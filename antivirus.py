@@ -19,6 +19,7 @@ import threading
 from typing import List, Dict, Any, Optional, Set, Tuple
 import inspect
 import copy
+import tempfile
 import numpy as np
 import capstone
 
@@ -464,8 +465,6 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                                 local_matched_rules.append(rule.identifier)
                                 match_details = extract_yarax_match_details(rule, rule_filename)
                                 local_matched_results.append(match_details)
-                            else:
-                                logging.info(f"Rule {rule.identifier} is excluded from {rule_filename}.")
 
                         # Update shared results
                         with results_lock:
@@ -1036,7 +1035,6 @@ class PEFeatureExtractor:
                 # Attempt to load PE file directly
                 pe = pefile.PE(file_path, fast_load=True)
             except pefile.PEFormatError:
-                logging.error(f"{file_path} is not a valid PE file.")
                 return None
             except Exception as ex:
                 logging.error(f"Error loading {file_path} as PE: {str(ex)}", exc_info=True)
@@ -1214,16 +1212,11 @@ def calculate_vector_similarity(vec1: List[float], vec2: List[float]) -> float:
 def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
     """Scan a file for malicious activity using machine learning definitions loaded from JSON."""
     malware_definition = "Unknown"
-    logging.info(f"Starting machine learning scan for file: {file_path}")
-
     try:
         pe = pefile.PE(file_path)
         pe.close()
     except pefile.PEFormatError:
-        logging.error(f"File {file_path} is not a valid PE file. Returning default value 'Unknown'.")
         return False, malware_definition, 0
-
-    logging.info(f"File {file_path} is a valid PE file, proceeding with feature extraction.")
 
     file_numeric_features = pe_extractor.extract_numeric_features(file_path)
     if not file_numeric_features:
@@ -1594,19 +1587,28 @@ def load_scan_cache(filepath: str) -> Dict[str, Any]:
     return {'_clamav_db_version': get_clamav_db_version()}
 
 def save_scan_cache(filepath: str, cache: Dict[str, Any]):
-    """Save complete scan cache with all results."""
+    """Save complete scan cache safely (atomic write)."""
     try:
         # Update metadata
         cache['_clamav_db_version'] = get_clamav_db_version()
         cache['_last_save'] = time.time()
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, indent=4)
-        
+
+        # Write to a temporary file first
+        dirpath = os.path.dirname(filepath) or "."
+        with tempfile.NamedTemporaryFile('w', dir=dirpath, delete=False, encoding='utf-8') as tmpf:
+            json.dump(cache, tmpf, indent=4)
+            tmpf.flush()
+            os.fsync(tmpf.fileno())
+            tempname = tmpf.name
+
+        # Atomically replace the old cache file
+        os.replace(tempname, filepath)
+
         cached_files = len([k for k in cache.keys() if not k.startswith('_')])
-        logging.debug(f"Saved complete cache with {cached_files} entries (including all scan results)")
+        logging.debug(f"Safely saved cache with {cached_files} entries (including all scan results)")
+
     except Exception as e:
-        logging.error(f"Could not save cache file: {e}")
+        logging.error(f"Could not safely save cache file: {e}")
 
 # ---------------- Modified process_file with hybrid caching ----------------
 def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
