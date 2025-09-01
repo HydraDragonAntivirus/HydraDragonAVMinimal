@@ -15,6 +15,7 @@ import time
 import json
 import hashlib
 import string
+import multiprocessing
 import threading
 from typing import List, Dict, Any, Optional, Set, Tuple
 import inspect
@@ -100,13 +101,13 @@ malicious_file_names: List[str] = []
 benign_numeric_features: List[List[float]] = []
 benign_file_names: List[str] = []
 
-# Counters
-malicious_file_count = 0
-benign_file_count = 0
-threading_lock = threading.Lock()
+# These will be replaced by managed objects for multiprocessing
+malicious_file_count = None
+benign_file_count = None
+POTENTIAL_FALSE_POSITIVES = None
+worker_lock = None
+excluded_yara_rules = None
 
-# Globals for new features
-POTENTIAL_FALSE_POSITIVES: List[Tuple[str, List[str]]] = []
 _global_db_state_hash: Optional[str] = None
 
 
@@ -354,6 +355,7 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
     yara_x.Scanner objects are not sendable across threads.
     """
     data_content = None
+    results_lock = threading.Lock()
     results = {
         'matched_rules': [],
         'matched_results': []
@@ -397,7 +399,7 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                                 logging.info(f"Rule {rule.identifier} is excluded from {rule_filename}.")
 
                         # Update shared results
-                        with threading_lock:
+                        with results_lock:
                             results['matched_rules'].extend(local_matched_rules)
                             results['matched_results'].extend(local_matched_results)
                     else:
@@ -1460,17 +1462,34 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
         f"{'='*50}"
     )
 
-# ---------------- Per-file processing (REWRITTEN) ----------------
-def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
+# --- Worker Initializer for ProcessPoolExecutor ---
+def init_worker(lock, mal_count, benign_count, fp_list, db_path, yara_dir, ml_path, excluded_path):
+    """Initializes globals for each worker process."""
+    global worker_lock, malicious_file_count, benign_file_count, POTENTIAL_FALSE_POSITIVES
+    global CLAMAV_INPROC, _global_yara_compiled, excluded_yara_rules
+    
+    print(f"Initializing worker process: {os.getpid()}")
+    
+    # Set shared managed objects as globals for this worker
+    worker_lock = lock
+    malicious_file_count = mal_count
+    benign_file_count = benign_count
+    POTENTIAL_FALSE_POSITIVES = fp_list
+
+    # Initialize non-shareable resources (these will be process-local)
+    init_inproc_clamav(dbpath=db_path, autoreload=False)
+    preload_yara_rules(yara_dir)
+    load_ml_definitions(ml_path)
+    
+    # Load excluded rules into a global for the worker
+    excluded_yara_rules = load_excluded_rules(excluded_path)
+
+# ---------------- Per-file processing for Workers ----------------
+def process_file_worker(file_to_scan: str, db_hash: str):
     """
     Process a single file with robust, thread-safe caching and false-positive detection.
-    - Cache is invalidated if signature databases change.
-    - ClamAV is always run, never cached.
-    - YARA and ML results are cached.
-    - Detects and reports potential false positives (YARA hit, others clean).
+    This function is executed by worker processes.
     """
-    global malicious_file_count, benign_file_count
-
     if not os.path.exists(file_to_scan):
         logging.warning(f"File not found: {file_to_scan}")
         return
@@ -1478,8 +1497,8 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
     try:
         size = os.path.getsize(file_to_scan)
         if size == 0:
-            with threading_lock:
-                benign_file_count += 1
+            with worker_lock:
+                benign_file_count.value += 1
             logging.info(f"Skipped empty file: {file_to_scan}")
             return
         st = os.stat(file_to_scan)
@@ -1496,11 +1515,11 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
     from_cache = False
 
     # --- CACHE CHECK (Thread-safe) ---
-    with threading_lock:
+    with worker_lock:
         cache = load_scan_cache(SCAN_CACHE_FILE)
-        if cache.get('_database_state_hash') != _global_db_state_hash:
-            logging.warning(f"Database state changed (was {cache.get('_database_state_hash')}, now {_global_db_state_hash}). Invalidating cache.")
-            cache = {'_database_state_hash': _global_db_state_hash}
+        if cache.get('_database_state_hash') != db_hash:
+            logging.warning(f"Database state changed (was {cache.get('_database_state_hash')}, now {db_hash}). Invalidating cache.")
+            cache = {'_database_state_hash': db_hash}
             # Overwrite the old cache with a fresh, empty one immediately
             save_scan_cache(SCAN_CACHE_FILE, cache)
         
@@ -1537,16 +1556,16 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
 
     # --- False Positive Check ---
     if is_yara_threat and not is_clamav_threat and not is_ml_threat:
-        with threading_lock:
+        with worker_lock:
             rules = [match.get('rule', 'UnknownRule') for match in yara_matches]
             POTENTIAL_FALSE_POSITIVES.append((os.path.basename(file_to_scan), rules))
 
     # --- Update Counters ---
-    with threading_lock:
+    with worker_lock:
         if is_threat:
-            malicious_file_count += 1
+            malicious_file_count.value += 1
         else:
-            benign_file_count += 1
+            benign_file_count.value += 1
 
     # --- Log full result if threat is found ---
     if is_threat:
@@ -1568,10 +1587,10 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
             'file_type': file_type,
             '_stat': stat_key
         }
-        with threading_lock:
+        with worker_lock:
             # Re-load and check hash again to handle race conditions
             cache = load_scan_cache(SCAN_CACHE_FILE)
-            if cache.get('_database_state_hash') == _global_db_state_hash:
+            if cache.get('_database_state_hash') == db_hash:
                 cache[md5_hash] = cacheable_result
                 save_scan_cache(SCAN_CACHE_FILE, cache)
             else:
@@ -1593,16 +1612,8 @@ def main():
         os.remove(SCAN_CACHE_FILE)
         logging.info("Cache cleared manually.")
 
-    # Initialize 64-bit safe in-process ClamAV
+    # Main process loads definitions ONLY to get the database hash
     clamav_db_path = os.path.join(BASE_DIR, 'clamav', 'database')
-    init_inproc_clamav(dbpath=clamav_db_path, autoreload=True)
-
-    # Load ML definitions and YARA rules
-    load_ml_definitions(ML_RESULTS_JSON)
-    preload_yara_rules(YARA_RULES_DIR)
-    excluded_yara_rules = load_excluded_rules(EXCLUDED_RULES_FILE)
-    
-    # Get initial database state hash
     global _global_db_state_hash
     _global_db_state_hash = get_database_state_hash(clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON)
     logging.info(f"Current database state hash: {_global_db_state_hash}")
@@ -1630,18 +1641,25 @@ def main():
     logging.info(f"Discovered {total_files} files")
 
     max_workers = DEFAULT_MAX_WORKERS
-    logging.info(f"Using up to {max_workers} threads for scanning")
+    logging.info(f"Using up to {max_workers} processes for scanning")
 
-    # Initialize counters
-    global malicious_file_count, benign_file_count
-    malicious_file_count = 0
-    benign_file_count = 0
+    # --- Process Pool Execution ---
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
-    # Threaded scanning
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_file, f, excluded_yara_rules): f for f in files_to_scan}
-        for fut in tqdm(concurrent.futures.as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
+    manager = multiprocessing.Manager()
+    managed_lock = manager.Lock()
+    managed_mal_count = manager.Value('i', 0)
+    managed_benign_count = manager.Value('i', 0)
+    managed_fp_list = manager.List()
+
+    initargs = (
+        managed_lock, managed_mal_count, managed_benign_count, managed_fp_list,
+        clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON, EXCLUDED_RULES_FILE
+    )
+
+    with ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker, initargs=initargs) as executor:
+        futures = {executor.submit(process_file_worker, f, _global_db_state_hash): f for f in files_to_scan}
+        for fut in tqdm(as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
             fpath = futures[fut]
             try:
                 fut.result()
@@ -1650,13 +1668,18 @@ def main():
 
     wall_elapsed = time.perf_counter() - start_wall
 
+    # Retrieve results from managed objects
+    final_malicious_count = managed_mal_count.value
+    final_benign_count = managed_benign_count.value
+    final_fp_list = list(managed_fp_list)
+
     # --- False Positive Report ---
-    if POTENTIAL_FALSE_POSITIVES:
+    if final_fp_list:
         print("\n" + "="*60)
         print("POSSIBLE FALSE POSITIVE REPORT")
         print("The following files matched YARA rules but were found clean by ClamAV and ML.")
         print("="*60)
-        for fpath, rules in POTENTIAL_FALSE_POSITIVES:
+        for fpath, rules in final_fp_list:
             print(f"FILE: {fpath}")
             for rule in rules:
                 print(f"  - YARA Rule: {rule}")
@@ -1666,9 +1689,9 @@ def main():
     print("\n" + "="*60)
     print("FINAL SCAN SUMMARY")
     print("="*60)
-    print(f"Total Malicious Files Found: {malicious_file_count}")
-    print(f"Total Clean Files Scanned: {benign_file_count}")
-    print(f"Total Files Processed: {malicious_file_count + benign_file_count}")
+    print(f"Total Malicious Files Found: {final_malicious_count}")
+    print(f"Total Clean Files Scanned: {final_benign_count}")
+    print(f"Total Files Processed: {final_malicious_count + final_benign_count}")
     print(f"Wall-clock Total Execution Time: {wall_elapsed:.2f}s")
     print("="*60)
 
