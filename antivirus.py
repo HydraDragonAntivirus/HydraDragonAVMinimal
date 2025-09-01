@@ -17,7 +17,7 @@ import hashlib
 import string
 import threading
 from typing import List, Dict, Any, Optional, Set, Tuple
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import capstone
 
@@ -309,16 +309,20 @@ def check_file_type_with_die(file_path: str) -> str:
         logging.error(f"DIE check failed: {e}")
         return "Unknown"
 
-def load_excluded_rules(filepath: str) -> Set[str]:
-    excluded: Set[str] = set()
-    if not os.path.exists(filepath):
-        return excluded
+def load_excluded_rules(filepath: str) -> List[str]:
     try:
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            excluded.update(line.strip() for line in f if line.strip())
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+                logging.warning("Excluded rules file is not a list, ignoring")
+                return []
+        else:
+            return []
     except Exception as e:
-        logging.error(f"Error reading excluded rules file: {e}")
-    return excluded
+        logging.error(f"Error loading excluded rules from {filepath}: {e}")
+        return []
 
 def extract_yarax_match_details(rule, source):
     """Extract match details from YARA-X rule match."""
@@ -333,6 +337,10 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
     Sequential YARA scanning. For YARA-X we do NOT spawn a thread here because
     yara_x.Scanner objects are not sendable across threads.
     """
+    # Fix: Ensure excluded_rules is never None
+    if excluded_rules is None:
+        excluded_rules = set()
+    
     data_content = None
     results_lock = threading.Lock()
     results = {
@@ -369,13 +377,18 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                         local_matched_rules = []
                         local_matched_results = []
 
-                        for rule in getattr(scan_results, "matching_rules", []):
-                            if rule.identifier not in excluded_rules:
-                                local_matched_rules.append(rule.identifier)
-                                match_details = extract_yarax_match_details(rule, rule_filename)
-                                local_matched_results.append(match_details)
-                            else:
-                                logging.info(f"Rule {rule.identifier} is excluded from {rule_filename}.")
+                        # Fix: Handle case where matching_rules might be None
+                        matching_rules = getattr(scan_results, "matching_rules", None)
+                        if matching_rules is not None:
+                            for rule in matching_rules:
+                                # Fix: Safely check rule.identifier
+                                rule_id = getattr(rule, 'identifier', None)
+                                if rule_id is not None and rule_id not in excluded_rules:
+                                    local_matched_rules.append(rule_id)
+                                    match_details = extract_yarax_match_details(rule, rule_filename)
+                                    local_matched_results.append(match_details)
+                                elif rule_id is not None and rule_id in excluded_rules:
+                                    logging.info(f"Rule {rule_id} is excluded from {rule_filename}.")
 
                         # Update shared results
                         with results_lock:
@@ -1581,11 +1594,14 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
 
 # ---------------- Main ----------------
 def main():
+    global excluded_yara_rules, _global_db_state_hash
+    global mal_features, mal_names, ben_features, ben_names
+
     if os.path.exists(local_clamav):
         print(f"Added local ClamAV path to search: {local_clamav}")
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format="%(asctime)s - %(levelname)s - %(message)s",
         filename=LOG_FILE,
         filemode="w"
@@ -1605,7 +1621,6 @@ def main():
         logging.info("Cache cleared manually.")
 
     clamav_db_path = os.path.join(BASE_DIR, "clamav", "database")
-    global _global_db_state_hash
     _global_db_state_hash = get_database_state_hash(clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON)
     logging.info(f"Current database state hash: {_global_db_state_hash}")
 
@@ -1635,11 +1650,22 @@ def main():
     final_fp_list = []
     start_wall = time.perf_counter()
 
-    # Workers load everything once
-    with ProcessPoolExecutor(
-        initializer=worker_init,
-        initargs=(clamav_db_path, YARA_RULES_DIR, EXCLUDED_RULES_FILE, ML_RESULTS_JSON)
-    ) as executor:
+    # --- ONE-TIME INITIALIZATION (main thread) ---
+    # Initialize scanner, YARA, ML, and other shared state once in main thread
+    init_inproc_clamav(dbpath=clamav_db_path, autoreload=True)
+    preload_yara_rules(YARA_RULES_DIR)
+    
+    # FIX: Initialize global variables that worker functions depend on
+    excluded_yara_rules = set(load_excluded_rules(EXCLUDED_RULES_FILE))  # Convert to set and ensure it's not None
+    ml_data = load_ml_definitions(ML_RESULTS_JSON)
+    if ml_data:
+        mal_features, mal_names, ben_features, ben_names = ml_data
+    else:
+        mal_features, mal_names, ben_features, ben_names = [], [], [], []
+
+    # --- Use ThreadPoolExecutor instead of ProcessPoolExecutor ---
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=1000) as executor:
         futures = {
             executor.submit(process_file_worker, f, _global_db_state_hash): f
             for f in files_to_scan
