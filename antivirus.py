@@ -22,24 +22,7 @@ import pefile
 import chardet
 from tqdm import tqdm
 import clamav
-
-script_dir = os.getcwd()
-
-# Define log directories and files
-log_directory = os.path.join(script_dir, "log")
-if not os.path.exists(log_directory):
-    os.makedirs(log_directory)
-
-application_log_file = os.path.join(
-    log_directory, "antivirus.log"
-)
-
-# Configure logging for application log
-logging.basicConfig(
-    filename=application_log_file,
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-)
+from clamav import script_dir
 
 thread_lock = threading.Lock()
 
