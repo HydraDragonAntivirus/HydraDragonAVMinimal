@@ -144,13 +144,28 @@ def get_database_state_hash(clamav_db_path: str, yara_rules_dir: str, ml_defs_pa
     return hasher.hexdigest()
 
 def load_scan_cache(filepath: str) -> Dict[str, Any]:
-    if os.path.exists(filepath):
+    """Load scan cache from JSON file with proper error handling for empty/corrupted files."""
+    if not os.path.exists(filepath):
+        return {}
+    
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            if not content:
+                return {}
+            return json.loads(content)
+    except json.JSONDecodeError as e:
+        logging.warning(f"Cache file is corrupted (JSON error): {e}. Starting with fresh cache.")
+        # Remove the corrupted cache file
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logging.warning(f"Could not read cache file: {e}")
-    return {}
+            os.remove(filepath)
+            logging.info(f"Removed corrupted cache file: {filepath}")
+        except Exception:
+            pass
+        return {}
+    except Exception as e:
+        logging.warning(f"Could not read cache file: {e}")
+        return {}
 
 def save_scan_cache(filepath: str, cache: Dict[str, Any]):
     try:
@@ -310,18 +325,20 @@ def check_file_type_with_die(file_path: str) -> str:
         return "Unknown"
 
 def load_excluded_rules(filepath: str) -> List[str]:
+    """
+    Load excluded rules from a plain text file. One rule name per line.
+    """
     try:
-        if os.path.exists(filepath):
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    return data
-                logging.warning("Excluded rules file is not a list, ignoring")
-                return []
-        else:
-            return []
-    except Exception as e:
-        logging.error(f"Error loading excluded rules from {filepath}: {e}")
+        # Load excluded rules from text file
+        with open(filepath, "r") as excluded_file:
+            excluded_rules = [line.strip() for line in excluded_file if line.strip()]
+            logging.info(f"YARA Excluded Rules loaded: {len(excluded_rules)} rules")
+            return excluded_rules
+    except FileNotFoundError:
+        logging.error(f"Excluded rules file not found: {filepath}")
+        return []
+    except Exception as ex:
+        logging.error(f"Error loading excluded rules: {ex}")
         return []
 
 def extract_yarax_match_details(rule, source):
@@ -387,8 +404,6 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                                     local_matched_rules.append(rule_id)
                                     match_details = extract_yarax_match_details(rule, rule_filename)
                                     local_matched_results.append(match_details)
-                                elif rule_id is not None and rule_id in excluded_rules:
-                                    logging.info(f"Rule {rule_id} is excluded from {rule_filename}.")
 
                         # Update shared results
                         with results_lock:
@@ -579,6 +594,23 @@ class PEFeatureExtractor:
                 exports.append(export_info)
         return exports
 
+    def _get_callback_addresses(self, pe, address_of_callbacks) -> List[int]:
+        """Retrieve callback addresses from the TLS directory."""
+        try:
+            callback_addresses = []
+            # Read callback addresses from the memory-mapped file
+            while True:
+                callback_address = pe.get_dword_at_rva(address_of_callbacks - pe.OPTIONAL_HEADER.ImageBase)
+                if callback_address == 0:
+                    break  # End of callback list
+                callback_addresses.append(callback_address)
+                address_of_callbacks += 4  # Move to the next address (4 bytes for DWORD)
+
+            return callback_addresses
+        except Exception as e:
+            logging.error(f"Error retrieving TLS callback addresses: {e}")
+            return []
+
     def analyze_tls_callbacks(self, pe) -> Dict[str, Any]:
         """Analyze TLS (Thread Local Storage) callbacks and extract relevant details."""
         try:
@@ -606,23 +638,6 @@ class PEFeatureExtractor:
         except Exception as e:
             logging.error(f"Error analyzing TLS callbacks: {e}")
             return {}
-
-    def _get_callback_addresses(self, pe, address_of_callbacks) -> List[int]:
-        """Retrieve callback addresses from the TLS directory."""
-        try:
-            callback_addresses = []
-            # Read callback addresses from the memory-mapped file
-            while True:
-                callback_address = pe.get_dword_at_rva(address_of_callbacks - pe.OPTIONAL_HEADER.ImageBase)
-                if callback_address == 0:
-                    break  # End of callback list
-                callback_addresses.append(callback_address)
-                address_of_callbacks += 4  # Move to the next address (4 bytes for DWORD)
-
-            return callback_addresses
-        except Exception as e:
-            logging.error(f"Error retrieving TLS callback addresses: {e}")
-            return []
 
     def analyze_dos_stub(self, pe) -> Dict[str, Any]:
         """Analyze DOS stub program."""
@@ -959,6 +974,7 @@ class PEFeatureExtractor:
                 # Attempt to load PE file directly
                 pe = pefile.PE(file_path, fast_load=True)
             except pefile.PEFormatError:
+                logging.error(f"{file_path} is not a valid PE file.")
                 return None
             except Exception as ex:
                 logging.error(f"Error loading {file_path} as PE: {str(ex)}", exc_info=True)
@@ -1143,7 +1159,6 @@ def scan_file_with_machine_learning_ai(
 ) -> Tuple[bool, str, float]:
     """Scan a file for malicious activity using machine learning definitions passed as arguments."""
     malware_definition = "Unknown"
-    logging.info(f"Starting machine learning scan for file: {file_path}")
 
     try:
         pe = pefile.PE(file_path)
@@ -1473,31 +1488,11 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
         f"{'='*50}"
     )
 
-# ---------------- Worker Initializer ----------------
-def worker_init(clamav_db_path, yara_rules_dir, excluded_rules_file, ml_defs_path):
-    """
-    Runs once per worker to initialize scanners and ML definitions.
-    """
-    global excluded_yara_rules, _global_db_state_hash
-    global mal_features, mal_names, ben_features, ben_names
-
-    # Init ClamAV + YARA once per worker
-    init_inproc_clamav(dbpath=clamav_db_path)
-    preload_yara_rules(yara_rules_dir)
-    excluded_yara_rules = load_excluded_rules(excluded_rules_file)
-
-    # Load ML defs once per worker
-    ml_data = load_ml_definitions(ml_defs_path)
-    if ml_data:
-        mal_features, mal_names, ben_features, ben_names = ml_data
-    else:
-        mal_features, mal_names, ben_features, ben_names = [], [], [], []
-
-
+# ---------------- Per-file Processing ----------------
 # ---------------- Per-file Processing ----------------
 def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional[Tuple[str, List[str]]]]:
     """
-    Process a single file using globals set by worker_init.
+    Process a single file using globals set in main thread.
     """
     if not os.path.exists(file_to_scan):
         logging.warning(f"File not found: {file_to_scan}")
@@ -1523,11 +1518,6 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
 
     # --- CACHE CHECK ---
     cache = load_scan_cache(SCAN_CACHE_FILE)
-    if cache.get('_database_state_hash') != db_hash:
-        logging.warning(f"Database state changed (was {cache.get('_database_state_hash')}, now {db_hash}). Invalidating cache.")
-        cache = {'_database_state_hash': db_hash}
-        save_scan_cache(SCAN_CACHE_FILE, cache)
-
     if md5_hash in cache:
         cached_data = cache[md5_hash]
         from_cache = True
@@ -1584,13 +1574,12 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
             '_stat': stat_key
         }
         cache = load_scan_cache(SCAN_CACHE_FILE)
+        # Only save if cache still has the expected database state hash
         if cache.get('_database_state_hash') == db_hash:
             cache[md5_hash] = cacheable_result
             save_scan_cache(SCAN_CACHE_FILE, cache)
 
-    logging.info(f"Finished processing {os.path.basename(file_to_scan)}")
     return is_threat, potential_fp_info
-
 
 # ---------------- Main ----------------
 def main():
@@ -1601,7 +1590,7 @@ def main():
         print(f"Added local ClamAV path to search: {local_clamav}")
 
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
         filename=LOG_FILE,
         filemode="w"
@@ -1650,21 +1639,25 @@ def main():
     final_fp_list = []
     start_wall = time.perf_counter()
 
-    # --- ONE-TIME INITIALIZATION (main thread) ---
-    # Initialize scanner, YARA, ML, and other shared state once in main thread
+    # --- ONE-TIME INITIALIZATION (main thread only) ---
     init_inproc_clamav(dbpath=clamav_db_path, autoreload=True)
     preload_yara_rules(YARA_RULES_DIR)
+    excluded_yara_rules = set(load_excluded_rules(EXCLUDED_RULES_FILE))
     
-    # FIX: Initialize global variables that worker functions depend on
-    excluded_yara_rules = set(load_excluded_rules(EXCLUDED_RULES_FILE))  # Convert to set and ensure it's not None
     ml_data = load_ml_definitions(ML_RESULTS_JSON)
     if ml_data:
         mal_features, mal_names, ben_features, ben_names = ml_data
     else:
         mal_features, mal_names, ben_features, ben_names = [], [], [], []
 
-    # --- Use ThreadPoolExecutor instead of ProcessPoolExecutor ---
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # Initialize cache with correct database state hash (prevent duplicate warnings)
+    cache = load_scan_cache(SCAN_CACHE_FILE)
+    if cache.get('_database_state_hash') != _global_db_state_hash:
+        logging.info(f"Database state changed (was {cache.get('_database_state_hash')}, now {_global_db_state_hash}). Initializing cache.")
+        cache = {'_database_state_hash': _global_db_state_hash}
+        save_scan_cache(SCAN_CACHE_FILE, cache)
+
+    # --- Use ThreadPoolExecutor ---
     with ThreadPoolExecutor(max_workers=1000) as executor:
         futures = {
             executor.submit(process_file_worker, f, _global_db_state_hash): f
