@@ -405,7 +405,6 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
 
     return matched_rules
 
-### NEVER CHANGE 100% WORKING PART ###
 # --- PE Analysis and Feature Extraction Functions ---
 
 class PEFeatureExtractor:
@@ -1449,7 +1448,6 @@ def load_ml_definitions(filepath: str) -> bool:
         logging.error(f"Failed to load or parse ML definitions from {filepath}: {e}. ML scanning will be disabled.")
         return False
 
-## END OF 100% WOKRING PART ### 
 # ---------------- Result logging ----------------
 def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
     # Determine if the result indicates a threat
