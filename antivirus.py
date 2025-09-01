@@ -402,7 +402,6 @@ def scan_file_with_yara_sequentially(file_path: str) -> List[Dict]:
 # NOTE: The entire PEFeatureExtractor class and related ML functions
 # (calculate_vector_similarity, scan_file_with_machine_learning_ai, load_ml_definitions)
 # are included here but omitted for brevity in this diff view. Their internal logic is unchanged.
-
 class PEFeatureExtractor:
     def __init__(self):
         self.features_cache = {}
