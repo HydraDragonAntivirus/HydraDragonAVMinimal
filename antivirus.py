@@ -1950,7 +1950,7 @@ def main():
 
     load_ml_definitions(ML_RESULTS_JSON)
     preload_yara_rules(YARA_RULES_DIR)
-    excluded_yara_rules = load_excluded_rules(EXCLUDED_RULES_FILE)
+    excluded_yara_rules = load_excluded_rules(EXCLUDED_RULES_FILE) or []
 
     if not args.path:
         parser.print_help()
@@ -1975,22 +1975,72 @@ def main():
     logging.info(f"Discovered {total_files} files (using memory+disk hybrid cache)")
 
     max_workers = DEFAULT_MAX_WORKERS
-    logging.info(f"Using up to {max_workers} threads for scanning")
+    logging.info(f"Using up to {max_workers} worker processes for scanning")
 
     # Initialize counters
     global malicious_file_count, benign_file_count
     malicious_file_count = 0
     benign_file_count = 0
 
-    # Threaded scanning
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+    # Process-based parallel scanning (no new helper methods added)
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_file, f, excluded_yara_rules): f for f in files_to_scan}
-        for fut in tqdm(concurrent.futures.as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
+        for fut in tqdm(as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
             fpath = futures[fut]
             try:
-                fut.result()
+                res = fut.result()
             except Exception as e:
-                logging.error(f"{fpath} generated exception: {e}")
+                logging.error(f"{fpath} generated exception during execution: {e}")
+                continue
+
+            # Try to derive malicious/benign from the worker result if possible
+            marked = False
+            if isinstance(res, dict):
+                try:
+                    mlr = (res.get("ml_result") or {})
+                    clam = (res.get("clamav_result") or {})
+                    if mlr.get("is_malicious", False):
+                        malicious_file_count += 1
+                        marked = True
+                    elif str(clam.get("status", "")).lower() == "threat_found":
+                        malicious_file_count += 1
+                        marked = True
+                    else:
+                        benign_file_count += 1
+                        marked = True
+                except Exception:
+                    marked = False
+
+            if not marked:
+                # Fallback: inspect disk cache for this file entry (best-effort match)
+                try:
+                    cache = load_scan_cache(SCAN_CACHE_FILE)
+                    entry = None
+                    for k, v in cache.items():
+                        if not isinstance(v, dict):
+                            continue
+                        # Common possible path/filename fields to match
+                        if v.get("_path") == fpath or v.get("path") == fpath:
+                            entry = v
+                            break
+                        if v.get("filename") and os.path.basename(fpath) == v.get("filename"):
+                            entry = v
+                            break
+                        if v.get("_stat") and isinstance(v.get("_stat"), str) and v.get("_stat") in fpath:
+                            entry = v
+                            break
+                    if entry:
+                        mlr = (entry.get("ml_result") or {})
+                        clam = (entry.get("clamav_result") or {})
+                        if mlr.get("is_malicious", False) or str(clam.get("status", "")).lower() == "threat_found":
+                            malicious_file_count += 1
+                        else:
+                            benign_file_count += 1
+                    else:
+                        logging.debug(f"No classification available for {fpath}; skipping counter update.")
+                except Exception as e:
+                    logging.debug(f"Fallback cache inspection failed for {fpath}: {e}")
 
     wall_elapsed = time.perf_counter() - start_wall
 
