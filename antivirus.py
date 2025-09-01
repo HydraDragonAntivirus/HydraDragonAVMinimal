@@ -77,7 +77,7 @@ from tqdm import tqdm
 # ---------------- Paths & configuration ----------------
 YARA_RULES_DIR = os.path.join(BASE_DIR, 'yara')
 EXCLUDED_RULES_FILE = os.path.join(BASE_DIR, 'excluded', 'excluded_rules.txt')
-ML_RESULTS_JSON = os.path.join(BASE_DIR, 'machinelearning', 'results.json')
+ML_RESULTS_JSON = os.path.join(BASE_DIR, 'machine_learning', 'results.json')
 SCAN_CACHE_FILE = os.path.join(BASE_DIR, 'scan_cache.json')
 
 # Limits / concurrency
@@ -89,7 +89,7 @@ ORDERED_YARA_FILES = [
     'yaraxtr.yrc',
     'valhalla-rules.yrc',
     'icewater.yrc',
-    'machinelearning.yrc',
+    'machine_learning.yrc',
     'clean_rules.yrc'
 ]
 _global_yara_compiled: Dict[str, Any] = {}
