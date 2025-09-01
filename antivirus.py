@@ -1680,3 +1680,6 @@ def main():
     print(f"Total Files Processed: {final_malicious_count + final_benign_count}")
     print(f"Wall-clock Total Execution Time: {wall_elapsed:.2f}s")
     print("=" * 60)
+
+if __name__ == "__main__":
+    main()
