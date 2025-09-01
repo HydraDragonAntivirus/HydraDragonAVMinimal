@@ -17,6 +17,8 @@ import hashlib
 import string
 import threading
 from typing import List, Dict, Any, Optional, Set, Tuple
+from collections import Counter
+import shutil
 import inspect
 import copy
 import numpy as np
@@ -1768,7 +1770,135 @@ def clear_memory_caches():
     _memory_cache_ml.clear()
     logging.info("Cleared all in-memory caches")
 
-# ---------------- Modified main function ----------------
+# ---------------------------------------------------------------------
+# Helper functions added / changed
+# ---------------------------------------------------------------------
+def _extract_rule_name_from_match(m):
+    """
+    Normalize common yara-match structures to a rule name string.
+    Accepts dicts like {'rule': 'XXX', 'tags': [...]} or {'identifier': 'XXX'}
+    or raw strings. Returns None-ish when no name found.
+    """
+    if isinstance(m, dict):
+        return m.get("rule") or m.get("identifier") or m.get("name") or m.get("rule_name")
+    return str(m) if m else None
+
+
+def collect_false_positive_rules_from_cache(cache_dict, already_excluded=None, min_frequency=1):
+    """
+    Return Counter of yara rule names that are candidates for exclusion:
+      - yara_matches present
+      - clamav_result.status != 'threat_found'
+      - ml_result.is_malicious == False
+
+    `cache_dict` is the loaded scan_cache (dict).
+    `already_excluded` is an iterable of rule names to ignore (set recommended).
+    `min_frequency` minimum number of distinct files that must have this rule match
+                  before it's considered for automatic exclusion.
+    """
+    if already_excluded is None:
+        already_excluded = set()
+    else:
+        already_excluded = set(already_excluded)
+
+    rule_counter = Counter()
+
+    for key, entry in cache_dict.items():
+        # skip metadata keys in cache
+        if not isinstance(key, str) or key.startswith("_"):
+            continue
+        if not isinstance(entry, dict):
+            continue
+
+        yara_matches = entry.get("yara_matches") or []
+        if not yara_matches:
+            continue
+
+        # check clamav result
+        clamav = entry.get("clamav_result") or {}
+        clamav_status = str(clamav.get("status", "")).lower()
+        if clamav_status == "threat_found":
+            continue
+
+        # check ML
+        ml = entry.get("ml_result") or {}
+        if ml.get("is_malicious", False):
+            continue
+
+        # candidate -> extract rule names (may be list of dicts or strings)
+        seen_rules_for_file = set()
+        for m in yara_matches:
+            rname = _extract_rule_name_from_match(m)
+            if not rname:
+                continue
+            # dedupe per-file so the same rule matching multiple offsets in one file counts once
+            if rname not in already_excluded:
+                seen_rules_for_file.add(rname)
+        for r in seen_rules_for_file:
+            rule_counter[r] += 1
+
+    # apply min_frequency and exclude already_excluded
+    candidates = {r: c for r, c in rule_counter.items() if c >= min_frequency and r not in already_excluded}
+    return Counter(candidates)
+
+
+def auto_append_excluded_rules(cache_path, excluded_rules_file, backup=True, min_frequency=1):
+    """
+    Loads cache at cache_path, finds candidate rules, and appends them to excluded_rules_file.
+    Returns (added_rules_list, all_candidates_counter)
+    """
+    try:
+        cache = load_scan_cache(cache_path)
+    except Exception as e:
+        logging.error(f"Failed to load cache for false-positive collection: {e}")
+        return [], Counter()
+
+    # load existing excludes (as a set)
+    try:
+        existing = set(load_excluded_rules(excluded_rules_file) or [])
+    except Exception:
+        existing = set()
+
+    candidates = collect_false_positive_rules_from_cache(cache, already_excluded=existing, min_frequency=min_frequency)
+
+    if not candidates:
+        logging.info("No candidate rules found for auto-exclusion.")
+        return [], candidates
+
+    # Prepare list sorted by frequency (descending)
+    sorted_candidates = [r for r, _ in candidates.most_common()]
+
+    if backup:
+        try:
+            if os.path.exists(excluded_rules_file):
+                shutil.copy(excluded_rules_file, excluded_rules_file + ".bak")
+                logging.info(f"Backed up excluded rules to {excluded_rules_file}.bak")
+        except Exception as be:
+            logging.warning(f"Could not create backup of excluded rules: {be}")
+
+    added = []
+    try:
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(excluded_rules_file) or ".", exist_ok=True)
+        with open(excluded_rules_file, "a", encoding="utf-8") as fh:
+            for rule in sorted_candidates:
+                # double-check not added in the meantime
+                if rule in existing:
+                    continue
+                fh.write(rule.strip() + "\n")
+                added.append(rule)
+                existing.add(rule)
+        logging.info(f"Appended {len(added)} rules to {excluded_rules_file}")
+    except Exception as e:
+        logging.error(f"Failed to write excluded rules file: {e}")
+        # return candidates even if write failed
+        return [], candidates
+
+    return added, candidates
+
+# ---------------------------------------------------------------------
+# Full modified main() (replace your existing main with this)
+# ---------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="HydraDragon with Memory+Disk Caching (All results preserved)")
     parser.add_argument("--clear-cache", action="store_true", help="Clear disk scan cache")
@@ -1778,7 +1908,7 @@ def main():
     parser.add_argument(
         "--false-positive-test",
         action="store_true",
-        help="Automatically exclude YARA rules that trigger but ML+ClamAV say clean" 
+        help="Automatically exclude YARA rules that trigger but ML+ClamAV say clean"
     )
     args = parser.parse_args()
 
@@ -1797,7 +1927,7 @@ def main():
         cache = load_scan_cache(SCAN_CACHE_FILE)
         memory_stats = get_memory_cache_stats()
         disk_cached_count = len([k for k in cache.keys() if not k.startswith('_')])
-        
+
         print(f"Cache Statistics:")
         print(f"Disk Cache:")
         print(f"  - Total cached results: {disk_cached_count}")
@@ -1812,7 +1942,7 @@ def main():
     # Initialize ClamAV and load definitions
     db_abs = os.path.abspath("ClamAV/database")
     init_inproc_clamav(dbpath=db_abs, autoreload=True)
-    
+
     # Initialize ClamAV DB version tracking
     global _clamav_db_version
     _clamav_db_version = get_clamav_db_version()
@@ -1853,7 +1983,6 @@ def main():
     benign_file_count = 0
 
     # Threaded scanning
-    import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_file, f, excluded_yara_rules): f for f in files_to_scan}
         for fut in tqdm(concurrent.futures.as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
@@ -1869,7 +1998,7 @@ def main():
     cache = load_scan_cache(SCAN_CACHE_FILE)
     memory_stats = get_memory_cache_stats()
     disk_cached_count = len([k for k in cache.keys() if not k.startswith('_')])
-    
+
     print("\n" + "="*60)
     print("FINAL SCAN SUMMARY")
     print("="*60)
@@ -1887,5 +2016,33 @@ def main():
     print("Cache Policy: Memory+Disk hybrid, ClamAV resets on DB update")
     print("="*60)
 
+    # ----------------- Auto false-positive exclusion (optional) -----------------
+    if args.false_positive_test:
+        print("\n-- Auto false-positive test enabled: collecting candidate YARA rules to exclude --")
+        # choose min_frequency accordingly; set to 1 for immediate behavior,
+        # or bump to 2/3 to require repeats.
+        min_freq = 1
+        added_rules, candidates = auto_append_excluded_rules(SCAN_CACHE_FILE, EXCLUDED_RULES_FILE, backup=True, min_frequency=min_freq)
+        if added_rules:
+            print(f"Auto-excluded {len(added_rules)} YARA rules (appended to {EXCLUDED_RULES_FILE}):")
+            for r in added_rules:
+                print(f"  - {r}")
+        else:
+            if candidates:
+                # candidates found but none added (e.g., they were already excluded)
+                print("Found candidate rules but none were added (already excluded or below frequency threshold).")
+                # Optionally list candidate counts for dry visibility
+                print("\nCandidate rule frequencies (not added):")
+                for r, c in candidates.most_common():
+                    print(f"  {r}: {c}")
+            else:
+                print("No candidate rules found for auto-exclusion.")
+    # -------------------------------------------------------------------------
+
+    # keep final delimiter
+    print("="*60)
+
+
 if __name__ == "__main__":
     main()
+
