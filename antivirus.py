@@ -15,9 +15,9 @@ import time
 import json
 import hashlib
 import string
-import multiprocessing
 import threading
 from typing import List, Dict, Any, Optional, Set, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import capstone
 
@@ -1643,11 +1643,6 @@ def main():
 
     total_files = len(files_to_scan)
     logging.info(f"Discovered {total_files} files")
-
-    logging.info("Using ProcessPoolExecutor with default worker count (up to CPU count)")
-
-    # --- Process Pool Execution ---
-    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     initargs = (
         clamav_db_path, YARA_RULES_DIR, EXCLUDED_RULES_FILE
