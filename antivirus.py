@@ -24,31 +24,16 @@ import copy
 import numpy as np
 import capstone
 
-# Add ClamAV subfolder to Python path
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Add local ClamAV folder to DLL search path if it exists
-local_clamav = os.path.join(BASE_DIR, 'clamav')
-if os.path.exists(local_clamav):
-    os.add_dll_directory(local_clamav)
-    current_path = os.environ.get('PATH', '')
-    if local_clamav not in current_path:
-        os.environ['PATH'] = local_clamav + os.pathsep + current_path
-    print(f"Added local ClamAV path to search: {local_clamav}")
-
-# ---------------- Logging ----------------
-LOG_FILE = 'antivirus.log'
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    filename=LOG_FILE,
-                    filemode='w')
-logging.captureWarnings(True)
-print(f"Script starting - detailed log: {LOG_FILE}")
+# --- FIX: Moved setup logic into the main() function ---
+# The code that was here now resides inside the main() function,
+# wrapped by the if __name__ == '__main__': block. This prevents
+# it from re-running in every child process.
 
 # ---------------- Optional third-party flags ----------------
 _have_yara = False
 _have_yara_x = False
 _have_chardet = False
+_have_pefile = False
 
 try:
     import yara
@@ -77,6 +62,8 @@ except Exception:
 from tqdm import tqdm
 
 # ---------------- Paths & configuration ----------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = 'antivirus.log'
 YARA_RULES_DIR = os.path.join(BASE_DIR, 'yara')
 EXCLUDED_RULES_FILE = os.path.join(BASE_DIR, 'excluded', 'excluded_rules.txt')
 ML_RESULTS_JSON = os.path.join(BASE_DIR, 'machine_learning', 'results.json')
@@ -1228,7 +1215,7 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
 
     # Check malicious definitions
     for ml_feats, info in zip(malicious_numeric_features, malicious_file_names):
-        similarity = calculate_vector_similarity(file_numeric_features, ml_feats)
+        similarity = calculate_vector_similarity(list(file_numeric_features.values()), ml_feats)
         nearest_malicious_similarity = max(nearest_malicious_similarity, similarity)
 
         if similarity >= threshold:
@@ -1250,7 +1237,7 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
     # If not malicious, check benign
     if not is_malicious_ml:
         for ml_feats, info in zip(benign_numeric_features, benign_file_names):
-            similarity = calculate_vector_similarity(file_numeric_features, ml_feats)
+            similarity = calculate_vector_similarity(list(file_numeric_features.values()), ml_feats)
             nearest_benign_similarity = max(nearest_benign_similarity, similarity)
 
             # Handle both string and dict cases
@@ -1900,6 +1887,29 @@ def auto_append_excluded_rules(cache_path, excluded_rules_file, backup=True, min
 # Full modified main() (replace your existing main with this)
 # ---------------------------------------------------------------------
 def main():
+    # --- FIX: Moved setup logic inside main() ---
+    # Add local ClamAV folder to DLL search path if it exists
+    local_clamav = os.path.join(BASE_DIR, 'clamav')
+    if os.path.exists(local_clamav):
+        # This check is for Python 3.8+ on Windows
+        if hasattr(os, 'add_dll_directory'):
+            os.add_dll_directory(local_clamav)
+        
+        # Also add to the system PATH for broader compatibility
+        current_path = os.environ.get('PATH', '')
+        if local_clamav not in current_path:
+            os.environ['PATH'] = local_clamav + os.pathsep + current_path
+        print(f"Added local ClamAV path to search: {local_clamav}")
+
+    # Configure logging
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(levelname)s - %(message)s',
+                        filename=LOG_FILE,
+                        filemode='w')
+    logging.captureWarnings(True)
+    print(f"Script starting - detailed log: {LOG_FILE}")
+    # --- End of moved logic ---
+
     parser = argparse.ArgumentParser(description="HydraDragon with Memory+Disk Caching (All results preserved)")
     parser.add_argument("--clear-cache", action="store_true", help="Clear disk scan cache")
     parser.add_argument("--clear-memory", action="store_true", help="Clear in-memory caches")
@@ -1940,7 +1950,7 @@ def main():
             return
 
     # Initialize ClamAV and load definitions
-    db_abs = os.path.abspath("ClamAV/database")
+    db_abs = os.path.abspath(os.path.join(BASE_DIR, "clamav", "database"))
     init_inproc_clamav(dbpath=db_abs, autoreload=True)
 
     # Initialize ClamAV DB version tracking
@@ -1950,7 +1960,7 @@ def main():
 
     load_ml_definitions(ML_RESULTS_JSON)
     preload_yara_rules(YARA_RULES_DIR)
-    excluded_yara_rules = load_excluded_rules(EXCLUDED_RULES_FILE) or []
+    excluded_yara_rules = load_excluded_rules(EXCLUDED_RULES_FILE) or set()
 
     if not args.path:
         parser.print_help()
@@ -1967,7 +1977,12 @@ def main():
     if os.path.isdir(target):
         for root, _, files in os.walk(target):
             for fname in files:
-                files_to_scan.append(os.path.join(root, fname))
+                try:
+                    full_path = os.path.join(root, fname)
+                    if os.path.exists(full_path): # Check for broken symlinks
+                         files_to_scan.append(full_path)
+                except Exception as e:
+                    logging.warning(f"Could not access file {fname} in {root}: {e}")
     else:
         files_to_scan = [target]
 
@@ -1989,58 +2004,13 @@ def main():
         for fut in tqdm(as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
             fpath = futures[fut]
             try:
-                res = fut.result()
+                # The result from process_file is not directly used here,
+                # as counters are updated via global lock within the function
+                # and results are saved to a cache file.
+                fut.result()
             except Exception as e:
-                logging.error(f"{fpath} generated exception during execution: {e}")
+                logging.error(f"{fpath} generated exception during execution: {e}", exc_info=True)
                 continue
-
-            # Try to derive malicious/benign from the worker result if possible
-            marked = False
-            if isinstance(res, dict):
-                try:
-                    mlr = (res.get("ml_result") or {})
-                    clam = (res.get("clamav_result") or {})
-                    if mlr.get("is_malicious", False):
-                        malicious_file_count += 1
-                        marked = True
-                    elif str(clam.get("status", "")).lower() == "threat_found":
-                        malicious_file_count += 1
-                        marked = True
-                    else:
-                        benign_file_count += 1
-                        marked = True
-                except Exception:
-                    marked = False
-
-            if not marked:
-                # Fallback: inspect disk cache for this file entry (best-effort match)
-                try:
-                    cache = load_scan_cache(SCAN_CACHE_FILE)
-                    entry = None
-                    for k, v in cache.items():
-                        if not isinstance(v, dict):
-                            continue
-                        # Common possible path/filename fields to match
-                        if v.get("_path") == fpath or v.get("path") == fpath:
-                            entry = v
-                            break
-                        if v.get("filename") and os.path.basename(fpath) == v.get("filename"):
-                            entry = v
-                            break
-                        if v.get("_stat") and isinstance(v.get("_stat"), str) and v.get("_stat") in fpath:
-                            entry = v
-                            break
-                    if entry:
-                        mlr = (entry.get("ml_result") or {})
-                        clam = (entry.get("clamav_result") or {})
-                        if mlr.get("is_malicious", False) or str(clam.get("status", "")).lower() == "threat_found":
-                            malicious_file_count += 1
-                        else:
-                            benign_file_count += 1
-                    else:
-                        logging.debug(f"No classification available for {fpath}; skipping counter update.")
-                except Exception as e:
-                    logging.debug(f"Fallback cache inspection failed for {fpath}: {e}")
 
     wall_elapsed = time.perf_counter() - start_wall
 
@@ -2095,4 +2065,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
