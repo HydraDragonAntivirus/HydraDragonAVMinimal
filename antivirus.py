@@ -402,6 +402,7 @@ def scan_file_with_yara_sequentially(file_path: str) -> List[Dict]:
 # NOTE: The entire PEFeatureExtractor class and related ML functions
 # (calculate_vector_similarity, scan_file_with_machine_learning_ai, load_ml_definitions)
 # are included here but omitted for brevity in this diff view. Their internal logic is unchanged.
+
 class PEFeatureExtractor:
     def __init__(self):
         self.features_cache = {}
@@ -550,6 +551,23 @@ class PEFeatureExtractor:
                 exports.append(export_info)
         return exports
 
+    def _get_callback_addresses(self, pe, address_of_callbacks) -> List[int]:
+        """Retrieve callback addresses from the TLS directory."""
+        try:
+            callback_addresses = []
+            # Read callback addresses from the memory-mapped file
+            while True:
+                callback_address = pe.get_dword_at_rva(address_of_callbacks - pe.OPTIONAL_HEADER.ImageBase)
+                if callback_address == 0:
+                    break  # End of callback list
+                callback_addresses.append(callback_address)
+                address_of_callbacks += 4  # Move to the next address (4 bytes for DWORD)
+
+            return callback_addresses
+        except Exception as e:
+            logging.error(f"Error retrieving TLS callback addresses: {e}")
+            return []
+
     def analyze_tls_callbacks(self, pe) -> Dict[str, Any]:
         """Analyze TLS (Thread Local Storage) callbacks and extract relevant details."""
         try:
@@ -577,23 +595,6 @@ class PEFeatureExtractor:
         except Exception as e:
             logging.error(f"Error analyzing TLS callbacks: {e}")
             return {}
-
-    def _get_callback_addresses(self, pe, address_of_callbacks) -> List[int]:
-        """Retrieve callback addresses from the TLS directory."""
-        try:
-            callback_addresses = []
-            # Read callback addresses from the memory-mapped file
-            while True:
-                callback_address = pe.get_dword_at_rva(address_of_callbacks - pe.OPTIONAL_HEADER.ImageBase)
-                if callback_address == 0:
-                    break  # End of callback list
-                callback_addresses.append(callback_address)
-                address_of_callbacks += 4  # Move to the next address (4 bytes for DWORD)
-
-            return callback_addresses
-        except Exception as e:
-            logging.error(f"Error retrieving TLS callback addresses: {e}")
-            return []
 
     def analyze_dos_stub(self, pe) -> Dict[str, Any]:
         """Analyze DOS stub program."""
