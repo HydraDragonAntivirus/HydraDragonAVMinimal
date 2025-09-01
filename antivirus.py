@@ -31,16 +31,12 @@ if os.path.exists(local_clamav):
     current_path = os.environ.get('PATH', '')
     if local_clamav not in current_path:
         os.environ['PATH'] = local_clamav + os.pathsep + current_path
-    print(f"Added local ClamAV path to search: {local_clamav}")
+    # This print statement will be moved to main()
+    # print(f"Added local ClamAV path to search: {local_clamav}")
 
 # ---------------- Logging ----------------
 LOG_FILE = 'antivirus.log'
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    filename=LOG_FILE,
-                    filemode='w')
-logging.captureWarnings(True)
-print(f"Script starting - detailed log: {LOG_FILE}")
+# Logging configuration will be moved to main() to prevent re-initialization in workers.
 
 # ---------------- Optional third-party flags ----------------
 _have_yara = False
@@ -1469,6 +1465,7 @@ def init_worker(db_path, yara_dir, excluded_path):
     """Initializes globals for each worker process."""
     global CLAMAV_INPROC, _global_yara_compiled, excluded_yara_rules
     
+    # This print statement is useful for debugging worker initialization.
     print(f"Initializing worker process: {os.getpid()}")
     
     # Initialize non-shareable resources (these will be process-local)
@@ -1594,6 +1591,18 @@ def process_file_worker(
 
 # ---------------- Main ----------------
 def main():
+    # --- Moved from top level to here ---
+    if os.path.exists(local_clamav):
+        print(f"Added local ClamAV path to search: {local_clamav}")
+
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(levelname)s - %(message)s',
+                        filename=LOG_FILE,
+                        filemode='w')
+    logging.captureWarnings(True)
+    print(f"Script starting - detailed log: {LOG_FILE}")
+    # --- End of moved code ---
+
     parser = argparse.ArgumentParser(description="HydraDragon (IN-PROCESS libclamav only, NO TIMEOUTS) + YARA + ML")
     parser.add_argument("--clear-cache", action="store_true", help="Clear scan cache before starting")
     parser.add_argument("path", nargs='?', help="Path to file or directory to scan")
