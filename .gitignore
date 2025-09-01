@@ -182,5 +182,5 @@ cython_debug/
 /ClamAV
 /detectiteasy
 /yara
-/machinelearning
+/machine_learning
 scan_cache.json

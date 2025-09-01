@@ -77,7 +77,7 @@ from tqdm import tqdm
 # ---------------- Paths & configuration ----------------
 YARA_RULES_DIR = os.path.join(BASE_DIR, 'yara')
 EXCLUDED_RULES_FILE = os.path.join(BASE_DIR, 'excluded', 'excluded_rules.txt')
-ML_RESULTS_JSON = os.path.join(BASE_DIR, 'machinelearning', 'results.json')
+ML_RESULTS_JSON = os.path.join(BASE_DIR, 'machine_learning', 'results.json')
 SCAN_CACHE_FILE = os.path.join(BASE_DIR, 'scan_cache.json')
 
 # Limits / concurrency
@@ -89,7 +89,7 @@ ORDERED_YARA_FILES = [
     'yaraxtr.yrc',
     'valhalla-rules.yrc',
     'icewater.yrc',
-    'machinelearning.yrc',
+    'machine_learning.yrc',
     'clean_rules.yrc'
 ]
 _global_yara_compiled: Dict[str, Any] = {}
@@ -1660,6 +1660,11 @@ def main():
     parser = argparse.ArgumentParser(description="HydraDragon (IN-PROCESS libclamav only, NO TIMEOUTS) + YARA + ML")
     parser.add_argument("--clear-cache", action="store_true", help="Clear scan cache")
     parser.add_argument("path", nargs='?', help="Path to file or directory to scan")
+    parser.add_argument(
+    "--false-positive-test",
+    action="store_true",
+    help="Automatically exclude YARA rules that trigger but ML+ClamAV say clean" 
+    )
     args = parser.parse_args()
 
     start_wall = time.perf_counter()
