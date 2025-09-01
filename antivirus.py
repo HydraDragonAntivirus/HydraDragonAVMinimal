@@ -103,7 +103,7 @@ benign_file_names: List[str] = []
 # Counters
 malicious_file_count = 0
 benign_file_count = 0
-file_counter_lock = threading.Lock()
+global_lock = threading.Lock()
 
 # ---------------- In-process ClamAV placeholders ----------------
 CLAMAV_INPROC = None  # instance of Scanner
@@ -1586,35 +1586,36 @@ def load_scan_cache(filepath: str) -> Dict[str, Any]:
     return {'_clamav_db_version': get_clamav_db_version()}
 
 def save_scan_cache(filepath: str, new_data: Dict[str, Any]):
-    """Merge and safely save scan cache (preserve old entries)."""
+    """Thread-safe merge + save of scan cache (preserve old entries)."""
     try:
-        # Load existing cache if present
-        if os.path.exists(filepath):
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    existing = json.load(f)
-            except Exception:
-                logging.warning("Existing cache corrupted, starting fresh")
+        with cache_file_lock:  # Lock ensures one writer at a time
+            # Load existing cache if present
+            if os.path.exists(filepath):
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        existing = json.load(f)
+                except Exception:
+                    logging.warning("Existing cache corrupted, starting fresh")
+                    existing = {}
+            else:
                 existing = {}
-        else:
-            existing = {}
 
-        # Merge new data into existing
-        for k, v in new_data.items():
-            existing[k] = v
+            # Merge new data into existing
+            for k, v in new_data.items():
+                existing[k] = v
 
-        # Update metadata
-        existing['_clamav_db_version'] = get_clamav_db_version()
-        existing['_last_save'] = time.time()
+            # Update metadata
+            existing['_clamav_db_version'] = get_clamav_db_version()
+            existing['_last_save'] = time.time()
 
-        # Rewrite file (single file only, no tmp/bak)
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(existing, f, indent=4)
-            f.flush()
-            os.fsync(f.fileno())
+            # Write back safely
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(existing, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
 
-        cached_files = len([k for k in existing.keys() if not k.startswith('_')])
-        logging.debug(f"Merged + saved cache with {cached_files} entries")
+            cached_files = len([k for k in existing.keys() if not k.startswith('_')])
+            logging.debug(f"[Cache] Merged + saved with {cached_files} entries")
 
     except Exception as e:
         logging.error(f"Could not merge/save cache: {e}")
@@ -1673,7 +1674,7 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
             'ml_result': {'is_malicious': False, 'definition': 'Skipped - Empty file', 'similarity': 0.0},
             '_stat': stat_key
         }
-        with file_counter_lock:
+        with global_lock:
             benign_file_count += 1
         log_scan_result(md5_hash, result)
         cache[md5_hash] = _make_complete_cacheable_result(result)
@@ -1737,7 +1738,7 @@ def process_file(file_to_scan: str, excluded_yara_rules: Set[str]):
         ml_result.get('is_malicious', False)
     )
 
-    with file_counter_lock:
+    with global_lock:
         if is_threat:
             malicious_file_count += 1
         else:
