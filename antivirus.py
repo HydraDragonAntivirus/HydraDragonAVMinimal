@@ -965,7 +965,6 @@ class PEFeatureExtractor:
                 # Attempt to load PE file directly
                 pe = pefile.PE(file_path, fast_load=True)
             except pefile.PEFormatError:
-                logging.error(f"{file_path} is not a valid PE file.")
                 return None
             except Exception as ex:
                 logging.error(f"Error loading {file_path} as PE: {str(ex)}", exc_info=True)
@@ -1149,10 +1148,7 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
         pe = pefile.PE(file_path)
         pe.close()
     except pefile.PEFormatError:
-        logging.error(f"File {file_path} is not a valid PE file. Returning default value 'Unknown'.")
         return False, malware_definition, 0
-
-    logging.info(f"File {file_path} is a valid PE file, proceeding with feature extraction.")
 
     file_numeric_features = pe_extractor.extract_numeric_features(file_path)
     if not file_numeric_features:
