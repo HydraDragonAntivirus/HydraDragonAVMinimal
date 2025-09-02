@@ -1683,10 +1683,17 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
 def main():
     global excluded_yara_rules, _global_db_state_hash, global_scan_cache
 
-    parser = argparse.ArgumentParser(description="HydraDragon (IN-PROCESS libclamav only, NO TIMEOUTS) + YARA + ML")
+    parser = argparse.ArgumentParser(
+        description="HydraDragon (IN-PROCESS libclamav only, NO TIMEOUTS) + YARA + ML"
+    )
     parser.add_argument("--clear-cache", action="store_true", help="Clear scan cache before starting")
+    parser.add_argument("--max-workers", type=int, default=1000,
+                        help="Maximum number of worker threads for scanning (default: 1000). Set higher for very large I/O-bound scans.")
     parser.add_argument("path", nargs="?", help="Path to file or directory to scan")
     args = parser.parse_args()
+
+    # Validate max_workers
+    max_workers = args.max_workers if args.max_workers and args.max_workers > 0 else 1000
 
     if args.clear_cache and os.path.exists(SCAN_CACHE_FILE):
         try:
@@ -1743,10 +1750,9 @@ def main():
             except Exception as e:
                 logger.error(f"Failed to save initial cache: {e}")
 
-    # --- Use ThreadPoolExecutor (safer workers count) ---
-    cpu = os.cpu_count() or 4
-    max_workers = min(64, cpu * 5)  # conservative default; adjust as needed
+    logger.info(f"Starting scan with max_workers={max_workers}")
 
+    # --- Use ThreadPoolExecutor with requested number of workers ---
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(process_file_worker, f, _global_db_state_hash): f
