@@ -1652,22 +1652,27 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
 def start_scan(files_to_scan, db_hash, max_workers):
     scanned_files = 0
     malicious_count = 0
+    scan_results = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_file_worker, f, db_hash): f for f in files_to_scan}
 
         with tqdm(total=len(files_to_scan), desc="Scanning files", unit="file") as pbar:
             for future in as_completed(futures):
+                file_path = futures[future]
                 try:
                     result, _ = future.result()
+                    scan_results[file_path] = result
                     if result:
                         malicious_count += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    scan_results[file_path] = False
+                    logger.error(f"Error scanning {file_path}: {e}")
                 scanned_files += 1
                 pbar.update(1)
 
     logger.info(f"Scan complete. {scanned_files}/{len(files_to_scan)} files scanned. Threats: {malicious_count}")
+    return scan_results
 
 # ---------------- Main ----------------
 def main():
