@@ -58,6 +58,7 @@ _global_yara_compiled: Dict[str, Any] = {}
 # Globals for worker processes
 excluded_yara_rules = None
 _global_db_state_hash: Optional[str] = None
+clamav_scanner: Optional[clamav.Scanner] = None
 
 # ---------------- Utility functions ----------------
 def compute_md5(path: str) -> str:
@@ -180,35 +181,70 @@ def save_scan_cache(filepath: str, cache: Dict[str, Any], lock: threading.Lock =
                 except Exception:
                     pass
 
-# ---------------- YARA preload ----------------
-def preload_yara_rules(rules_dir: str):
-    global _global_yara_compiled
-    for rule_filename in ORDERED_YARA_FILES:
-        rule_filepath = os.path.join(rules_dir, rule_filename)
-        if not os.path.exists(rule_filepath):
-            logger.info(f"YARA rule not found (skipping): {rule_filepath}")
-            continue
-        try:
-            if rule_filename == 'yaraxtr.yrc':
-                # pass file object to deserialize_from
-                with open(rule_filepath, "rb") as f:
-                    rules = yara_x.Rules.deserialize_from(f)
-                    _global_yara_compiled[rule_filename] = rules
-            else:
-                # works for precompiled YARA rules
-                compiled = yara.load(rule_filepath)
-                _global_yara_compiled[rule_filename] = compiled
-            logger.info(f"Preloaded YARA rules: {rule_filename}")
-        except Exception as e:
-            logger.error(f"Failed to preload YARA rule {rule_filename}: {e}")
+# ---------------- Engine Initialization ----------------
+def initialize_clamav() -> clamav.Scanner:
+    """Initializes the ClamAV scanner engine."""
+    logger.info("Initializing ClamAV engine...")
+    try:
+        scanner = clamav.Scanner(libclamav_path=libclamav_path, dbpath=clamav_database_directory_path)
+        logger.info("ClamAV engine initialized successfully.")
+        return scanner
+    except Exception as e:
+        logger.critical(f"Failed to initialize ClamAV engine: {e}", exc_info=True)
+        sys.exit(f"CRITICAL: Could not load ClamAV engine. Exiting. Error: {e}")
 
-clamav_scanner = clamav.Scanner(libclamav_path=libclamav_path, dbpath=clamav_database_directory_path)
+def _load_one_yara_rule(rule_filename: str, rules_dir: str) -> Optional[Tuple[str, Any]]:
+    """Helper function to load a single YARA rule file."""
+    rule_filepath = os.path.join(rules_dir, rule_filename)
+    if not os.path.exists(rule_filepath):
+        logger.info(f"YARA rule not found (skipping): {rule_filepath}")
+        return None
+    try:
+        if rule_filename == 'yaraxtr.yrc':
+            with open(rule_filepath, "rb") as f:
+                rules = yara_x.Rules.deserialize_from(f)
+                return rule_filename, rules
+        else:
+            compiled = yara.load(rule_filepath)
+            return rule_filename, compiled
+    except Exception as e:
+        logger.error(f"Failed to preload YARA rule {rule_filename}: {e}")
+        return None
+
+def preload_yara_rules(rules_dir: str, max_workers: int = 10):
+    """Preloads all YARA rule files in parallel."""
+    global _global_yara_compiled
+    logger.info("Preloading YARA rules in parallel...")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        tasks = {executor.submit(_load_one_yara_rule, filename, rules_dir): filename for filename in ORDERED_YARA_FILES}
+        
+        temp_results = {}
+        for future in as_completed(tasks):
+            result = future.result()
+            if result:
+                rule_filename, compiled_rules = result
+                temp_results[rule_filename] = compiled_rules
+                logger.info(f"Successfully loaded YARA rule: {rule_filename}")
+
+    # Ensure the final compiled rules are in the correct order for sequential scanning
+    with thread_lock:
+        _global_yara_compiled.clear()
+        for rule_filename in ORDERED_YARA_FILES:
+            if rule_filename in temp_results:
+                _global_yara_compiled[rule_filename] = temp_results[rule_filename]
+
+    logger.info("All YARA rules preloaded.")
 
 def reload_clamav_database():
     """
     Reloads the ClamAV engine with the updated database.
     Required after updating signatures.
     """
+    global clamav_scanner
+    if not clamav_scanner:
+        logger.error("ClamAV scanner not initialized, cannot reload database.")
+        return
     try:
         logger.info("Reloading ClamAV database...")
         clamav_scanner.loadDB()
@@ -218,6 +254,10 @@ def reload_clamav_database():
 
 def scan_file_with_clamav(file_path):
     """Scan file using the in-process ClamAV wrapper (scanner) and return virus name or 'Clean'."""
+    global clamav_scanner
+    if not clamav_scanner:
+        logger.error(f"ClamAV scanner not initialized. Cannot scan {file_path}.")
+        return "Error"
     try:
         file_path = os.path.abspath(file_path)
         ret, virus_name = clamav_scanner.scanFile(file_path)
@@ -1258,7 +1298,6 @@ def scan_file_with_machine_learning_ai(file_path: str, file_md5: Optional[str] =
         return False, malware_definition, nearest_benign_similarity
 
 # Load ML definitions
-
 def load_ml_definitions(filepath: str) -> bool:
     """
     Load ML definitions from a JSON file and populate global numeric feature lists.
@@ -1296,55 +1335,6 @@ def load_ml_definitions(filepath: str) -> bool:
                             continue
         except Exception:
             pass
-
-# ---------------- YARA preload ----------------
-def _load_one_yara_rule(rule_filename: str, rules_dir: str) -> Optional[Tuple[str, Any]]:
-    """Helper function to load a single YARA rule file."""
-    rule_filepath = os.path.join(rules_dir, rule_filename)
-    if not os.path.exists(rule_filepath):
-        logger.info(f"YARA rule not found (skipping): {rule_filepath}")
-        return None
-    try:
-        if rule_filename == 'yaraxtr.yrc':
-            with open(rule_filepath, "rb") as f:
-                rules = yara_x.Rules.deserialize_from(f)
-                return rule_filename, rules
-        else:
-            compiled = yara.load(rule_filepath)
-            return rule_filename, compiled
-    except Exception as e:
-        logger.error(f"Failed to preload YARA rule {rule_filename}: {e}")
-        return None
-
-def preload_yara_rules(rules_dir: str, max_workers: int = 10):
-    """Preloads all YARA rule files in parallel."""
-    global _global_yara_compiled
-    logger.info("Preloading YARA rules in parallel...")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        tasks = {executor.submit(_load_one_yara_rule, filename, rules_dir): filename for filename in ORDERED_YARA_FILES}
-        
-        temp_results = {}
-        for future in as_completed(tasks):
-            result = future.result()
-            if result:
-                rule_filename, compiled_rules = result
-                temp_results[rule_filename] = compiled_rules
-                logger.info(f"Successfully loaded YARA rule: {rule_filename}")
-
-    # Ensure the final compiled rules are in the correct order for sequential scanning
-    with thread_lock:
-        _global_yara_compiled.clear()
-        for rule_filename in ORDERED_YARA_FILES:
-            if rule_filename in temp_results:
-                _global_yara_compiled[rule_filename] = temp_results[rule_filename]
-
-    logger.info("All YARA rules preloaded.")
-
-
-clamav_scanner = clamav.Scanner(libclamav_path=libclamav_path, dbpath=clamav_database_directory_path)
-
-def reload_clamav_database():
         if not entropies:
             return 0.0, 0.0, 0.0  # mean, min, max
         mean = sum(entropies) / len(entropies)
@@ -1713,7 +1703,7 @@ def main():
     Entrypoint for the scanner. Uses a streaming executor.map-based approach
     to avoid creating millions of Future objects up front so tqdm starts immediately.
     """
-    global excluded_yara_rules, _global_db_state_hash, global_scan_cache
+    global excluded_yara_rules, _global_db_state_hash, global_scan_cache, clamav_scanner
 
     parser = argparse.ArgumentParser(
         description="HydraDragon (IN-PROCESS libclamav only, NO TIMEOUTS) + YARA + ML"
@@ -1737,17 +1727,19 @@ def main():
             
     # --- PARALLEL INITIALIZATION ---
     logger.info("Initializing scanner engines in parallel...")
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         # Submit all initialization tasks
+        clamav_future = executor.submit(initialize_clamav)
         yara_future = executor.submit(preload_yara_rules, YARA_RULES_DIR)
         ml_future = executor.submit(load_ml_definitions, ML_RESULTS_JSON)
         excluded_rules_future = executor.submit(load_excluded_rules, EXCLUDED_RULES_FILE)
 
         # Wait for results and handle them
-        yara_future.result()  # Modifies global _global_yara_compiled
-        ml_future.result()  # Modifies global ml feature lists
+        clamav_scanner = clamav_future.result()
+        yara_future.result()
+        ml_future.result()
         excluded_yara_rules = set(excluded_rules_future.result())
-    logger.info("Scanner engines initialized.")
+    logger.info("All scanner engines initialized successfully.")
 
     # Compute database state hash (ClamAV DB, YARA, ML definitions)
     clamav_db_path = os.path.join(script_dir, "clamav", "database")
@@ -1764,7 +1756,7 @@ def main():
         print(f"ERROR: Target not found: {target}", file=sys.stderr)
         sys.exit(6)
 
-    # Build files_to_scan list (unchanged behaviour)
+    # Build files_to_scan list
     logger.info(f"Discovering files in {target}...")
     files_to_scan: List[str] = []
     if os.path.isdir(target):
@@ -1775,15 +1767,12 @@ def main():
         files_to_scan = [target]
 
     total_files = len(files_to_scan)
-    logger.info(f"Discovered {total_files} files")
+    logger.info(f"Discovered {total_files} files. Starting scan...")
 
     # Counters / results
     final_malicious_count = 0
     final_benign_count = 0
     final_fp_list: List[Tuple[str, List[str]]] = []
-
-    # --- ONE-TIME INITIALIZATION (main thread only) ---
-    # Moved to parallel block above
 
     # Initialize in-memory cache (under lock)
     with thread_lock:
@@ -1812,9 +1801,7 @@ def main():
                 logger.error(f"Failed to save cache after DB state change: {e}")
         # else: hashes match, nothing to do
 
-    logger.info(f"Starting scan with max_workers={max_workers}")
-
-    # --- Minimal fix: stream with executor.map so tqdm reports immediately ---
+    # --- Stream results with executor.map ---
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # safe wrapper so a crashing worker doesn't break the iterator
         def safe_process_file_worker(file_to_scan, db_hash):
