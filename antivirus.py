@@ -11,7 +11,8 @@ import string
 import inspect
 import subprocess
 import threading
-from typing import List, Dict, Any, Optional, Set, Tuple
+import itertools
+from typing import List, Dict, Any, Optional, Set, Tuple, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import capstone
@@ -1550,18 +1551,18 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
             yara_display = yara_rules
     else:
         yara_display = []
-    
-    logger.info(
-        f"\n{'='*50}\n"
-        f"!!! MALWARE DETECTED !!! {source}\n"
-        f"File MD5: {md5}\n"
-        f"{'='*50}\n"
-        f"STATUS: {result.get('status')}\n"
-        f"--- ClamAV ---\n{json.dumps(result.get('clamav_result'), indent=2)}\n"
-        f"--- YARA ---\nMatched Rules: {', '.join(yara_display) if yara_display else 'None'}\n"
-        f"--- ML ---\n{json.dumps(result.get('ml_result'), indent=2)}\n"
-        f"{'='*50}"
-    )
+def discover_files_generator(target_path: str) -> Generator[str, None, None]:
+    """
+    Discovers files in the target path and yields them one by one
+    to avoid loading the entire list into memory.
+    """
+    logger.info(f"Discovering files in {target_path}...")
+    if os.path.isdir(target_path):
+        for root, _, files in os.walk(target_path, onerror=lambda err: logger.error(f"os.walk error: {err}")):
+            for fname in files:
+                yield os.path.join(root, fname)
+    elif os.path.exists(target_path):
+        yield target_path
 
 # ------------------ Worker (uses in-memory cache) ------------------
 def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional[Tuple[str, List[str]]]]:
@@ -1757,21 +1758,14 @@ def main():
         sys.exit(6)
 
     # Build files_to_scan list
-    logger.info(f"Discovering files in {target}...")
-    files_to_scan: List[str] = []
-    if os.path.isdir(target):
-        for root, _, files in os.walk(target):
-            for fname in files:
-                files_to_scan.append(os.path.join(root, fname))
-    else:
-        files_to_scan = [target]
+    files_to_scan_gen = discover_files_generator(target)
+    logger.info("File discovery is complete. Starting scan...")
 
-    total_files = len(files_to_scan)
-    logger.info(f"Discovered {total_files} files. Starting scan...")
 
     # Counters / results
     final_malicious_count = 0
     final_benign_count = 0
+    processed_files_count = 0
     final_fp_list: List[Tuple[str, List[str]]] = []
 
     # Initialize in-memory cache (under lock)
@@ -1812,23 +1806,23 @@ def main():
                 return False, None
 
         # create a lightweight generator that yields the same db_hash for each file
-        db_hash_iter = (_global_db_state_hash for _ in files_to_scan)
+        db_hash_iter = itertools.repeat(_global_db_state_hash)
 
         # stream results; executor.map will not pre-allocate millions of futures
         results_iter = executor.map(
             safe_process_file_worker,
-            files_to_scan,
+            files_to_scan_gen,
             db_hash_iter
         )
 
         # consume results as they arrive and update counters; tqdm starts as soon as first result is ready
         for is_threat, fp_info in tqdm(
             results_iter,
-            total=total_files,
             desc="Scanning files",
             unit="file",
             dynamic_ncols=True,
         ):
+            processed_files_count += 1
             if is_threat:
                 final_malicious_count += 1
             else:
@@ -1856,7 +1850,7 @@ def main():
     print("=" * 60)
     print(f"Total Malicious Files Found: {final_malicious_count}")
     print(f"Total Clean Files Scanned: {final_benign_count}")
-    print(f"Total Files Processed: {final_malicious_count + final_benign_count}")
+    print(f"Total Files Processed: {processed_files_count}")
     print(f"Wall-clock Total Execution Time: {wall_elapsed:.2f}s")
     print("=" * 60)
 
