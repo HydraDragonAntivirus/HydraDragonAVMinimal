@@ -1828,19 +1828,38 @@ def main():
     total_files = len(files_to_scan)
     logger.info(f"Found {total_files} files to scan.")
 
-    # Load or initialize scan cache
+    # --- Load or initialize scan cache safely ---
     with thread_lock:
-        global_scan_cache = load_scan_cache(SCAN_CACHE_FILE)
-        existing_hash = global_scan_cache.get('_database_state_hash')
+        try:
+            # Try loading existing cache
+            global_scan_cache = load_scan_cache(SCAN_CACHE_FILE)
+        except Exception as e:
+            logger.error(f"Failed to load scan cache ({e}). Creating a new one.")
+            global_scan_cache = {}
 
-        if existing_hash is None:
-            global_scan_cache['_database_state_hash'] = _global_db_state_hash
-            save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
-        elif existing_hash != _global_db_state_hash:
-            logger.info(f"Database state changed (was {existing_hash}, now {_global_db_state_hash}). Clearing cache.")
-            global_scan_cache.clear()
-            global_scan_cache['_database_state_hash'] = _global_db_state_hash
-            save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
+            # Always ensure database state hash is present and consistent
+            existing_hash = global_scan_cache.get('_database_state_hash')
+
+            if not existing_hash:
+                # Cache didn't exist or was empty -> create a new one
+                logger.info("No existing scan cache found. Creating a fresh one.")
+                global_scan_cache.clear()
+                global_scan_cache['_database_state_hash'] = _global_db_state_hash
+                save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
+
+            elif existing_hash != _global_db_state_hash:
+                # Database definitions changed -> reset cache
+                logger.info(
+                    f"Database state changed (was {existing_hash}, now {_global_db_state_hash}). "
+                    "Resetting scan cache."
+                )
+                global_scan_cache.clear()
+                global_scan_cache['_database_state_hash'] = _global_db_state_hash
+                save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
+
+            else:
+                # Cache is valid > keep using it
+                logger.info("Using existing scan cache.")
 
     # Start scanning using our improved threaded scanner
     false_positives = []
