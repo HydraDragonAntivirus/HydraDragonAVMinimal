@@ -3,7 +3,6 @@
 
 import os
 import sys
-import logging
 import argparse
 import time
 import json
