@@ -1720,9 +1720,6 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     return is_threat, None
 
 def start_scan(files_to_scan, db_hash, max_workers):
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from tqdm import tqdm
-
     total_files = len(files_to_scan)
     logger.info(f"Starting scan on {total_files} files...")
 
