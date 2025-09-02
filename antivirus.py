@@ -1296,6 +1296,55 @@ def load_ml_definitions(filepath: str) -> bool:
                             continue
         except Exception:
             pass
+
+# ---------------- YARA preload ----------------
+def _load_one_yara_rule(rule_filename: str, rules_dir: str) -> Optional[Tuple[str, Any]]:
+    """Helper function to load a single YARA rule file."""
+    rule_filepath = os.path.join(rules_dir, rule_filename)
+    if not os.path.exists(rule_filepath):
+        logger.info(f"YARA rule not found (skipping): {rule_filepath}")
+        return None
+    try:
+        if rule_filename == 'yaraxtr.yrc':
+            with open(rule_filepath, "rb") as f:
+                rules = yara_x.Rules.deserialize_from(f)
+                return rule_filename, rules
+        else:
+            compiled = yara.load(rule_filepath)
+            return rule_filename, compiled
+    except Exception as e:
+        logger.error(f"Failed to preload YARA rule {rule_filename}: {e}")
+        return None
+
+def preload_yara_rules(rules_dir: str, max_workers: int = 10):
+    """Preloads all YARA rule files in parallel."""
+    global _global_yara_compiled
+    logger.info("Preloading YARA rules in parallel...")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        tasks = {executor.submit(_load_one_yara_rule, filename, rules_dir): filename for filename in ORDERED_YARA_FILES}
+        
+        temp_results = {}
+        for future in as_completed(tasks):
+            result = future.result()
+            if result:
+                rule_filename, compiled_rules = result
+                temp_results[rule_filename] = compiled_rules
+                logger.info(f"Successfully loaded YARA rule: {rule_filename}")
+
+    # Ensure the final compiled rules are in the correct order for sequential scanning
+    with thread_lock:
+        _global_yara_compiled.clear()
+        for rule_filename in ORDERED_YARA_FILES:
+            if rule_filename in temp_results:
+                _global_yara_compiled[rule_filename] = temp_results[rule_filename]
+
+    logger.info("All YARA rules preloaded.")
+
+
+clamav_scanner = clamav.Scanner(libclamav_path=libclamav_path, dbpath=clamav_database_directory_path)
+
+def reload_clamav_database():
         if not entropies:
             return 0.0, 0.0, 0.0  # mean, min, max
         mean = sum(entropies) / len(entropies)
@@ -1674,6 +1723,7 @@ def main():
                         help="Maximum number of worker threads for scanning (default: 1000).")
     parser.add_argument("path", nargs="?", help="Path to file or directory to scan")
     args = parser.parse_args()
+    start_wall = time.perf_counter()
 
     # Ensure a sane positive integer for max_workers
     max_workers = args.max_workers if args.max_workers and args.max_workers > 0 else 1000
@@ -1684,6 +1734,20 @@ def main():
             logger.info("Cache cleared manually.")
         except Exception as e:
             logger.error(f"Failed to clear cache: {e}")
+            
+    # --- PARALLEL INITIALIZATION ---
+    logger.info("Initializing scanner engines in parallel...")
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        # Submit all initialization tasks
+        yara_future = executor.submit(preload_yara_rules, YARA_RULES_DIR)
+        ml_future = executor.submit(load_ml_definitions, ML_RESULTS_JSON)
+        excluded_rules_future = executor.submit(load_excluded_rules, EXCLUDED_RULES_FILE)
+
+        # Wait for results and handle them
+        yara_future.result()  # Modifies global _global_yara_compiled
+        ml_future.result()  # Modifies global ml feature lists
+        excluded_yara_rules = set(excluded_rules_future.result())
+    logger.info("Scanner engines initialized.")
 
     # Compute database state hash (ClamAV DB, YARA, ML definitions)
     clamav_db_path = os.path.join(script_dir, "clamav", "database")
@@ -1701,6 +1765,7 @@ def main():
         sys.exit(6)
 
     # Build files_to_scan list (unchanged behaviour)
+    logger.info(f"Discovering files in {target}...")
     files_to_scan: List[str] = []
     if os.path.isdir(target):
         for root, _, files in os.walk(target):
@@ -1716,14 +1781,9 @@ def main():
     final_malicious_count = 0
     final_benign_count = 0
     final_fp_list: List[Tuple[str, List[str]]] = []
-    start_wall = time.perf_counter()
 
     # --- ONE-TIME INITIALIZATION (main thread only) ---
-    preload_yara_rules(YARA_RULES_DIR)
-    excluded_yara_rules = set(load_excluded_rules(EXCLUDED_RULES_FILE))
-
-    # Load ML definitions (this sets the global variables correctly)
-    load_ml_definitions(ML_RESULTS_JSON)
+    # Moved to parallel block above
 
     # Initialize in-memory cache (under lock)
     with thread_lock:
