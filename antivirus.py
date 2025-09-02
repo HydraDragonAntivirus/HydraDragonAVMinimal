@@ -1770,9 +1770,14 @@ def main():
         print(f"ERROR: Target not found: {target}", file=sys.stderr)
         sys.exit(6)
 
-    # Build files_to_scan list
-    files_to_scan_gen = discover_files_generator(target)
-    logger.info("Starting file discovery and scan stream...")
+    # --- MODIFICATION START ---
+    # Convert the file generator to a list to get the total count for tqdm.
+    # This will add an initial delay and use more memory for large directories.
+    logger.info("Discovering all files to get a total count...")
+    files_to_scan = list(discover_files_generator(target))
+    total_files = len(files_to_scan)
+    logger.info(f"Found {total_files} files to scan. Starting scan...")
+    # --- MODIFICATION END ---
 
 
     # Counters / results
@@ -1824,13 +1829,14 @@ def main():
         # stream results; executor.map will not pre-allocate millions of futures
         results_iter = executor.map(
             safe_process_file_worker,
-            files_to_scan_gen,
+            files_to_scan, # Use the list of files now
             db_hash_iter
         )
 
         # consume results as they arrive and update counters; tqdm starts as soon as first result is ready
         for is_threat, fp_info in tqdm(
             results_iter,
+            total=total_files, # Provide the total number of files to tqdm
             desc="Scanning files",
             unit="file",
             dynamic_ncols=True,
