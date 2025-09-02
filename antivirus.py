@@ -1790,35 +1790,20 @@ def main():
     # --- Load or initialize scan cache safely ---
     with thread_lock:
         try:
-            # Try loading existing cache
             global_scan_cache = load_scan_cache(SCAN_CACHE_FILE)
+            logger.info("Loaded existing scan cache.")
         except Exception as e:
             logger.error(f"Failed to load scan cache ({e}). Creating a new one.")
             global_scan_cache = {}
 
-            # Always ensure database state hash is present and consistent
-            existing_hash = global_scan_cache.get('_database_state_hash')
-
-            if not existing_hash:
-                # Cache didn't exist or was empty -> create a new one
-                logger.info("No existing scan cache found. Creating a fresh one.")
-                global_scan_cache.clear()
-                global_scan_cache['_database_state_hash'] = _global_db_state_hash
+        if global_scan_cache.get('_database_state_hash') != _global_db_state_hash:
+            logger.info("Initializing/Resetting scan cache with current database state hash.")
+            global_scan_cache.clear()
+            global_scan_cache['_database_state_hash'] = _global_db_state_hash
+            try:
                 save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
-
-            elif existing_hash != _global_db_state_hash:
-                # Database definitions changed -> reset cache
-                logger.info(
-                    f"Database state changed (was {existing_hash}, now {_global_db_state_hash}). "
-                    "Resetting scan cache."
-                )
-                global_scan_cache.clear()
-                global_scan_cache['_database_state_hash'] = _global_db_state_hash
-                save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
-
-            else:
-                # Cache is valid > keep using it
-                logger.info("Using existing scan cache.")
+            except Exception as e:
+                logger.error(f"Failed to save scan cache: {e}")
 
     # Start scanning using our improved threaded scanner
     false_positives = []
