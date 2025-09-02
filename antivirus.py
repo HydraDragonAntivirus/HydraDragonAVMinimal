@@ -1551,6 +1551,19 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
             yara_display = yara_rules
     else:
         yara_display = []
+    
+    logger.info(
+        f"\n{'='*50}\n"
+        f"!!! MALWARE DETECTED !!! {source}\n"
+        f"File MD5: {md5}\n"
+        f"{'='*50}\n"
+        f"STATUS: {result.get('status')}\n"
+        f"--- ClamAV ---\n{json.dumps(result.get('clamav_result'), indent=2)}\n"
+        f"--- YARA ---\nMatched Rules: {', '.join(yara_display) if yara_display else 'None'}\n"
+        f"--- ML ---\n{json.dumps(result.get('ml_result'), indent=2)}\n"
+        f"{'='*50}"
+    )
+
 def discover_files_generator(target_path: str) -> Generator[str, None, None]:
     """
     Discovers files in the target path and yields them one by one
@@ -1759,7 +1772,7 @@ def main():
 
     # Build files_to_scan list
     files_to_scan_gen = discover_files_generator(target)
-    logger.info("File discovery is complete. Starting scan...")
+    logger.info("Starting file discovery and scan stream...")
 
 
     # Counters / results
