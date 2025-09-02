@@ -1681,6 +1681,10 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
 
 # ---------------- Main ----------------
 def main():
+    """
+    Entrypoint for the scanner. Uses a streaming executor.map-based approach
+    to avoid creating millions of Future objects up front so tqdm starts immediately.
+    """
     global excluded_yara_rules, _global_db_state_hash, global_scan_cache
 
     parser = argparse.ArgumentParser(
@@ -1688,11 +1692,11 @@ def main():
     )
     parser.add_argument("--clear-cache", action="store_true", help="Clear scan cache before starting")
     parser.add_argument("--max-workers", type=int, default=1000,
-                        help="Maximum number of worker threads for scanning (default: 1000). Set higher for very large I/O-bound scans.")
+                        help="Maximum number of worker threads for scanning (default: 1000).")
     parser.add_argument("path", nargs="?", help="Path to file or directory to scan")
     args = parser.parse_args()
 
-    # Validate max_workers
+    # Ensure a sane positive integer for max_workers
     max_workers = args.max_workers if args.max_workers and args.max_workers > 0 else 1000
 
     if args.clear_cache and os.path.exists(SCAN_CACHE_FILE):
@@ -1702,6 +1706,7 @@ def main():
         except Exception as e:
             logger.error(f"Failed to clear cache: {e}")
 
+    # Compute database state hash (ClamAV DB, YARA, ML definitions)
     clamav_db_path = os.path.join(script_dir, "clamav", "database")
     _global_db_state_hash = get_database_state_hash(clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON)
     logger.info(f"Current database state hash: {_global_db_state_hash}")
@@ -1716,6 +1721,7 @@ def main():
         print(f"ERROR: Target not found: {target}", file=sys.stderr)
         sys.exit(6)
 
+    # Build files_to_scan list (unchanged behaviour)
     files_to_scan: List[str] = []
     if os.path.isdir(target):
         for root, _, files in os.walk(target):
@@ -1727,9 +1733,10 @@ def main():
     total_files = len(files_to_scan)
     logger.info(f"Discovered {total_files} files")
 
+    # Counters / results
     final_malicious_count = 0
     final_benign_count = 0
-    final_fp_list = []
+    final_fp_list: List[Tuple[str, List[str]]] = []
     start_wall = time.perf_counter()
 
     # --- ONE-TIME INITIALIZATION (main thread only) ---
@@ -1741,40 +1748,71 @@ def main():
 
     # Initialize in-memory cache (under lock)
     with thread_lock:
+        # load whatever's on disk (may be {})
         global_scan_cache = load_scan_cache(SCAN_CACHE_FILE)
-        if global_scan_cache.get('_database_state_hash') != _global_db_state_hash:
-            logger.info(f"Database state changed (was {global_scan_cache.get('_database_state_hash')}, now {_global_db_state_hash}). Clearing cache.")
-            global_scan_cache = {'_database_state_hash': _global_db_state_hash}
+
+        existing_hash = global_scan_cache.get('_database_state_hash')
+        # If there's no existing hash, that's the first run: initialize silently
+        if existing_hash is None:
+            # set the current hash and persist; do not log/clear in this case
+            global_scan_cache['_database_state_hash'] = _global_db_state_hash
             try:
                 save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
             except Exception as e:
                 logger.error(f"Failed to save initial cache: {e}")
+        elif existing_hash != _global_db_state_hash:
+            # Real change in DB state — log and clear cache
+            logger.info(
+                f"Database state changed (was {existing_hash}, now {_global_db_state_hash}). Clearing cache."
+            )
+            global_scan_cache.clear()
+            global_scan_cache['_database_state_hash'] = _global_db_state_hash
+            try:
+                save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
+            except Exception as e:
+                logger.error(f"Failed to save cache after DB state change: {e}")
+        # else: hashes match, nothing to do
 
     logger.info(f"Starting scan with max_workers={max_workers}")
 
-    # --- Use ThreadPoolExecutor with requested number of workers ---
+    # --- Minimal fix: stream with executor.map so tqdm reports immediately ---
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(process_file_worker, f, _global_db_state_hash): f
-            for f in files_to_scan
-        }
-
-        for fut in tqdm(as_completed(futures), total=total_files, desc="Scanning files", unit="file"):
-            fpath = futures[fut]
+        # safe wrapper so a crashing worker doesn't break the iterator
+        def safe_process_file_worker(file_to_scan, db_hash):
             try:
-                is_threat, fp_info = fut.result()
-                if is_threat:
-                    final_malicious_count += 1
-                else:
-                    final_benign_count += 1
-                if fp_info:
-                    final_fp_list.append(fp_info)
+                return process_file_worker(file_to_scan, db_hash)
             except Exception as e:
-                logger.error(f"{fpath} generated exception: {e}")
+                logger.error(f"Worker raised for {file_to_scan}: {e}", exc_info=True)
+                return False, None
+
+        # create a lightweight generator that yields the same db_hash for each file
+        db_hash_iter = (_global_db_state_hash for _ in files_to_scan)
+
+        # stream results; executor.map will not pre-allocate millions of futures
+        results_iter = executor.map(
+            safe_process_file_worker,
+            files_to_scan,
+            db_hash_iter
+        )
+
+        # consume results as they arrive and update counters; tqdm starts as soon as first result is ready
+        for is_threat, fp_info in tqdm(
+            results_iter,
+            total=total_files,
+            desc="Scanning files",
+            unit="file",
+            dynamic_ncols=True,
+        ):
+            if is_threat:
+                final_malicious_count += 1
+            else:
                 final_benign_count += 1
+            if fp_info:
+                final_fp_list.append(fp_info)
 
     wall_elapsed = time.perf_counter() - start_wall
 
+    # Print possible false positives
     if final_fp_list:
         print("\n" + "=" * 60)
         print("POSSIBLE FALSE POSITIVE REPORT")
@@ -1786,6 +1824,7 @@ def main():
                 print(f"  - YARA Rule: {rule}")
             print("-" * 20)
 
+    # Final summary
     print("\n" + "=" * 60)
     print("FINAL SCAN SUMMARY")
     print("=" * 60)
@@ -1794,7 +1833,6 @@ def main():
     print(f"Total Files Processed: {final_malicious_count + final_benign_count}")
     print(f"Wall-clock Total Execution Time: {wall_elapsed:.2f}s")
     print("=" * 60)
-
 
 if __name__ == "__main__":
     main()
