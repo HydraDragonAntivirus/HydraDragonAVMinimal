@@ -12,6 +12,7 @@ import inspect
 import subprocess
 import threading
 import itertools
+import ctypes
 from typing import List, Dict, Any, Optional, Set, Tuple, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
@@ -62,6 +63,13 @@ _global_db_state_hash: Optional[str] = None
 clamav_scanner: Optional[clamav.Scanner] = None
 
 # ---------------- Utility functions ----------------
+def is_admin():
+    """Check if the script is running with administrative privileges on Windows."""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except Exception:
+        return False
+
 def compute_md5(path: str) -> str:
     h = hashlib.md5()
     with open(path, "rb") as f:
@@ -1728,6 +1736,15 @@ def main():
     parser.add_argument("path", nargs="?", help="Path to file or directory to scan")
     args = parser.parse_args()
     start_wall = time.perf_counter()
+
+    # --- Privilege Check (Windows Only) ---
+    if os.name == 'nt' and not is_admin():
+        logger.warning("The script is not running with administrative privileges.")
+        print("\n" + "="*60, file=sys.stderr)
+        print("WARNING: Administrative privileges are required for a full scan.", file=sys.stderr)
+        print("Please re-run this script from a terminal with 'Run as administrator'.", file=sys.stderr)
+        print("="*60 + "\n", file=sys.stderr)
+        sys.exit(1)
 
     # Ensure a sane positive integer for max_workers
     max_workers = args.max_workers if args.max_workers and args.max_workers > 0 else 1000
