@@ -4,14 +4,12 @@
 import os
 import sys
 import argparse
-import time
 import json
 import hashlib
 import string
 import inspect
 import subprocess
 import threading
-import itertools
 import ctypes
 from typing import List, Dict, Any, Optional, Set, Tuple, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1581,7 +1579,7 @@ def discover_files_generator(target_path: str) -> Generator[str, None, None]:
         yield target_path
 
 # ------------------ Worker (uses in-memory cache only) ------------------
-def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional[Tuple[str, List[str]]]]:
+def process_file_worker(file_to_scan: str, db_hash: str):
     if not os.path.exists(file_to_scan):
         return False, None
 
@@ -1593,85 +1591,82 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
 
     cache_key = f"{file_to_scan}:{stat_key}"
 
+    # --- Check cache in memory only ---
     with thread_lock:
         cached_entry = global_scan_cache.get(cache_key)
-        if cached_entry and cached_entry.get('_stat') == stat_key and global_scan_cache.get('_database_state_hash') == db_hash:
-            is_threat = cached_entry['final_result']['status'] == 'threat_found'
-            return is_threat, None
+        if cached_entry and cached_entry.get('_stat') == stat_key and \
+           global_scan_cache.get('_database_state_hash') == db_hash:
+            # Minimal cache: if clean, return immediately
+            if cached_entry.get('final_result', {}).get('status') == 'clean':
+                return False, None
+            else:
+                return True, cached_entry['final_result']
 
-    # --- MD5 COMPUTATION ---
+    # --- Compute MD5 ---
     try:
         md5_hash = compute_md5(file_to_scan)
     except Exception:
         md5_hash = "N/A"
 
     # --- CLAMAV ---
-    clamav_result_raw = scan_file_with_clamav(file_to_scan)
-    if clamav_result_raw == "Clean":
-        clamav_res = {'status': 'clean', 'signature': None}
-    elif clamav_result_raw == "Error":
-        clamav_res = {'status': 'error', 'signature': None}
-    else:
-        clamav_res = {'status': 'threat_found', 'signature': clamav_result_raw}
+    clamav_res_raw = scan_file_with_clamav(file_to_scan)
+    clamav_res = {'status': 'clean' if clamav_res_raw=="Clean" else 'threat_found', 'signature': clamav_res_raw if clamav_res_raw not in ["Clean","Error"] else None}
 
-    # --- DIE CHECK ---
+    # --- DIE / YARA / ML ---
     die_output, _ = get_die_output(file_to_scan, file_md5=md5_hash)
-    if is_file_fully_unknown(die_output):
-        final_result = {'status': 'clean', '_stat': stat_key}
-    else:
-        # --- YARA + ML ---
-        yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
-        ml_result = {'is_malicious': False, 'definition': 'Not Scanned', 'similarity': 0.0}
-        if clamav_res['status'] != 'threat_found' and not yara_matches:
-            try:
-                is_malicious, definition, sim = scan_file_with_machine_learning_ai(file_to_scan, file_md5=md5_hash)
-                ml_result = {'is_malicious': is_malicious, 'definition': definition, 'similarity': float(sim)}
-            except Exception:
-                pass
+    yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
+    is_malicious, ml_def, sim = False, "Not Scanned", 0.0
+    if clamav_res['status'] != 'threat_found' and not yara_matches:
+        try:
+            is_malicious, ml_def, sim = scan_file_with_machine_learning_ai(file_to_scan, file_md5=md5_hash)
+        except Exception:
+            pass
 
-        is_threat = clamav_res['status'] == 'threat_found' or len(yara_matches) > 0 or ml_result['is_malicious']
-        final_result = {
-            'status': 'threat_found' if is_threat else 'clean',
-            'clamav_result': clamav_res,
-            'yara_matches': yara_matches,
-            'ml_result': ml_result,
-            '_stat': stat_key
-        }
+    is_threat = clamav_res['status'] == 'threat_found' or yara_matches or is_malicious
+    final_result = {
+        'status': 'threat_found' if is_threat else 'clean',
+        'clamav_result': clamav_res if is_threat else None,
+        'yara_matches': yara_matches if is_threat else None,
+        'ml_result': {'is_malicious': is_malicious, 'definition': ml_def, 'similarity': sim} if is_threat else None,
+        '_stat': stat_key
+    }
 
-    # --- Update in-memory cache only ---
+    # --- Update in-memory cache ---
     with thread_lock:
-        if global_scan_cache.get('_database_state_hash') != db_hash:
-            global_scan_cache.clear()
-            global_scan_cache['_database_state_hash'] = db_hash
         global_scan_cache[cache_key] = {'final_result': final_result, '_stat': stat_key}
 
-    return final_result['status'] == 'threat_found', None
+    return is_threat, final_result
 
-
-# ------------------ Scan Controller ------------------
+# ------------------ Scan Runner ------------------
 def start_scan(files_to_scan, db_hash, max_workers):
+    total_files = len(files_to_scan)
+    logger.info(f"Starting scan on {total_files} files...")
+
     scanned_files = 0
     malicious_count = 0
     scan_results = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_file_worker, f, db_hash): f for f in files_to_scan}
+        # executor.map ile futures oluşturuyoruz
+        results_iterator = executor.map(lambda f: (f, process_file_worker(f, db_hash)), files_to_scan)
 
-        with tqdm(total=len(files_to_scan), desc="Scanning files", unit="file") as pbar:
-            for future in as_completed(futures):
-                file_path = futures[future]
-                try:
-                    result, _ = future.result()
-                    scan_results[file_path] = result
-                    if result:
-                        malicious_count += 1
-                except Exception as e:
-                    scan_results[file_path] = False
-                    logger.error(f"Error scanning {file_path}: {e}")
-                scanned_files += 1
-                pbar.update(1)
+        for file_path, (is_threat, result) in tqdm(results_iterator, total=total_files, desc="Scanning files", unit="file"):
+            scan_results[file_path] = result
+            scanned_files += 1
+            if is_threat:
+                malicious_count += 1
 
-    logger.info(f"Scan complete. {scanned_files}/{len(files_to_scan)} files scanned. Threats: {malicious_count}")
+    # --- Save cache once at the end ---
+    try:
+        save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
+        logger.info("Scan cache saved successfully at the end of scan.")
+    except Exception as e:
+        logger.error(f"Failed to save cache at end of scan: {e}")
+
+    logger.info("="*50)
+    logger.info(f"Scanning complete. {scanned_files}/{total_files} files scanned.")
+    logger.info(f"Threats detected: {malicious_count}")
+    logger.info("="*50)
     return scan_results
 
 # ---------------- Main ----------------
