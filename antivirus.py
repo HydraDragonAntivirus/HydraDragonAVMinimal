@@ -1494,36 +1494,83 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     if not md5_hash:
         return False, None
 
-    cached_data = None
-    from_cache = False
-
-    # --- CACHE CHECK ---
+    # --- CACHE CHECK FOR COMPLETE RESULTS ---
     cache = load_scan_cache(SCAN_CACHE_FILE)
     if md5_hash in cache:
-        cached_data = cache[md5_hash]
-        from_cache = True
+        cached_entry = cache[md5_hash]
+        # Check if we have a complete cached result (not just YARA/ML)
+        if (cached_entry.get('_stat') == stat_key and 
+            'final_result' in cached_entry and 
+            cache.get('_database_state_hash') == db_hash):
+            
+            cached_result = cached_entry['final_result']
+            is_threat = cached_result.get('status') == 'threat_found'
+            
+            if is_threat:
+                log_scan_result(md5_hash, cached_result, from_cache=True)
+            
+            # Handle potential false positives from cache
+            potential_fp_info = None
+            yara_matches = cached_result.get('yara_matches', [])
+            if yara_matches and not is_threat:
+                if isinstance(yara_matches, list) and yara_matches:
+                    if isinstance(yara_matches[0], dict):
+                        rules = [match.get('rule', 'UnknownRule') for match in yara_matches]
+                    else:
+                        rules = yara_matches
+                    potential_fp_info = (os.path.basename(file_to_scan), rules)
+            
+            return is_threat, potential_fp_info
 
     # --- CLAMAV ---
-    clamav_res = scan_file_with_clamav(file_to_scan)
-
-    # --- YARA + ML ---
-    if from_cache and cached_data:
-        yara_matches = cached_data.get('yara_matches', [])
-        ml_result = cached_data.get('ml_result', {})
+    clamav_result_raw = scan_file_with_clamav(file_to_scan)
+    # Convert string result to structured format
+    if clamav_result_raw == "Clean":
+        clamav_res = {'status': 'clean', 'signature': None}
+    elif clamav_result_raw == "Error":
+        clamav_res = {'status': 'error', 'signature': None}
     else:
-        die_output = get_die_output(file_to_scan)
-        file_type = is_file_fully_unknown(die_output)
-        if file_type:
-            return False, None
-        yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
+        clamav_res = {'status': 'threat_found', 'signature': clamav_result_raw}
 
-        if clamav_res.get('status') != 'threat_found' and not yara_matches:
-            is_malicious, definition, sim = scan_file_with_machine_learning_ai(
-                file_to_scan, mal_features, mal_names, ben_features, ben_names
-            )
-            ml_result = {'is_malicious': is_malicious, 'definition': definition, 'similarity': float(sim)}
-        else:
-            ml_result = {'is_malicious': False, 'definition': 'Not Scanned', 'similarity': 0.0}
+    # --- DIE CHECK ---
+    die_output, _ = get_die_output(file_to_scan)
+    if is_file_fully_unknown(die_output):
+        # Cache the clean result for unknown files
+        final_result = {
+            'status': 'clean',
+            'clamav_result': clamav_res,
+            'yara_matches': [],
+            'ml_result': {'is_malicious': False, 'definition': 'Unknown File Type', 'similarity': 0.0},
+            '_stat': stat_key
+        }
+        
+        # Cache this result
+        with thread_lock:
+            current_cache = load_scan_cache(SCAN_CACHE_FILE)
+            current_cache[md5_hash] = {
+                'final_result': final_result,
+                '_stat': stat_key
+            }
+            save_scan_cache(SCAN_CACHE_FILE, current_cache)
+        
+        return False, None
+
+    # --- YARA ---
+    yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
+
+    # --- MACHINE LEARNING ---
+    ml_result = {'is_malicious': False, 'definition': 'Not Scanned', 'similarity': 0.0}
+    if clamav_res.get('status') != 'threat_found' and not yara_matches:
+        try:
+            is_malicious, definition, sim = scan_file_with_machine_learning_ai(file_to_scan)
+            ml_result = {
+                'is_malicious': is_malicious, 
+                'definition': definition, 
+                'similarity': float(sim)
+            }
+        except Exception as e:
+            logger.error(f"ML scan failed for {file_to_scan}: {e}")
+            ml_result = {'is_malicious': False, 'definition': 'ML Error', 'similarity': 0.0}
 
     # --- FINAL DECISION ---
     is_threat = (
@@ -1532,51 +1579,55 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
         or ml_result.get('is_malicious', False)
     )
 
+    # Create final result structure
+    final_status = 'threat_found' if is_threat else 'clean'
+    final_result = {
+        'status': final_status,
+        'clamav_result': clamav_res,
+        'yara_matches': yara_matches,
+        'ml_result': ml_result,
+        '_stat': stat_key
+    }
+
+    # Handle potential false positives
     potential_fp_info = None
     if yara_matches and not is_threat:
-        rules = [match.get('rule', 'UnknownRule') for match in yara_matches]
-        potential_fp_info = (os.path.basename(file_to_scan), rules)
+        if isinstance(yara_matches, list) and yara_matches:
+            if isinstance(yara_matches[0], dict):
+                rules = [match.get('rule', 'UnknownRule') for match in yara_matches]
+            else:
+                rules = yara_matches
+            potential_fp_info = (os.path.basename(file_to_scan), rules)
 
     if is_threat:
-        final_result = {
-            'status': 'threat_found',
-            'clamav_result': clamav_res,
-            'yara_matches': yara_matches,
-            'ml_result': ml_result,
+        log_scan_result(md5_hash, final_result, from_cache=False)
+
+    # --- CACHE UPDATE WITH COMPLETE RESULTS ---
+    with thread_lock:
+        current_cache = load_scan_cache(SCAN_CACHE_FILE)
+
+        if current_cache.get('_database_state_hash') != db_hash:
+            logger.info(f"Initializing cache with new database state hash: {db_hash}")
+            current_cache = {'_database_state_hash': db_hash}
+
+        # Store complete result in cache
+        current_cache[md5_hash] = {
+            'final_result': final_result,
             '_stat': stat_key
         }
-        log_scan_result(md5_hash, final_result, from_cache=from_cache)
 
-    # --- CACHE UPDATE ---
-    if not from_cache:
-        cacheable_result = {
-            'yara_matches': yara_matches,
-            'ml_result': ml_result,
-            '_stat': stat_key
-        }
-        
-        # Thread-safe cache update
-        with thread_lock:
-            current_cache = load_scan_cache(SCAN_CACHE_FILE)
-
-            if current_cache.get('_database_state_hash') != db_hash:
-                logger.info(f"Initializing cache with new database state hash: {db_hash}")
-                current_cache = {'_database_state_hash': db_hash}
-
-            current_cache[md5_hash] = cacheable_result
-
-            try:
-                save_scan_cache(SCAN_CACHE_FILE, current_cache)
-                logger.debug(f"Cached scan result for {os.path.basename(file_to_scan)} (MD5: {md5_hash})")
-            except Exception as e:
-                logger.error(f"Failed to save cache: {e}")
+        try:
+            save_scan_cache(SCAN_CACHE_FILE, current_cache)
+            logger.debug(f"Cached complete scan result for {os.path.basename(file_to_scan)} (MD5: {md5_hash})")
+        except Exception as e:
+            logger.error(f"Failed to save cache: {e}")
 
     return is_threat, potential_fp_info
 
 # ---------------- Main ----------------
 def main():
     global excluded_yara_rules, _global_db_state_hash
-    global mal_features, mal_names, ben_features, ben_names
+    # Remove the undefined variable references and use the correct global names
     parser = argparse.ArgumentParser(description="HydraDragon (IN-PROCESS libclamav only, NO TIMEOUTS) + YARA + ML")
     parser.add_argument("--clear-cache", action="store_true", help="Clear scan cache before starting")
     parser.add_argument("path", nargs="?", help="Path to file or directory to scan")
@@ -1620,12 +1671,13 @@ def main():
     preload_yara_rules(YARA_RULES_DIR)
     excluded_yara_rules = set(load_excluded_rules(EXCLUDED_RULES_FILE))
     
+    # Load ML definitions (this sets the global variables correctly)
     load_ml_definitions(ML_RESULTS_JSON)
 
-    # Initialize cache with correct database state hash (prevent duplicate warnings)
+    # Initialize cache with correct database state hash
     cache = load_scan_cache(SCAN_CACHE_FILE)
     if cache.get('_database_state_hash') != _global_db_state_hash:
-        logger.info(f"Database state changed (was {cache.get('_database_state_hash')}, now {_global_db_state_hash}). Initializing cache.")
+        logger.info(f"Database state changed (was {cache.get('_database_state_hash')}, now {_global_db_state_hash}). Clearing cache.")
         cache = {'_database_state_hash': _global_db_state_hash}
         save_scan_cache(SCAN_CACHE_FILE, cache)
 
