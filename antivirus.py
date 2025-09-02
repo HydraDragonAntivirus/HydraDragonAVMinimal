@@ -403,7 +403,6 @@ def is_file_fully_unknown(die_output: str) -> bool:
 
     # We only care about the first two markers; ignore anything after.
     if len(lines) >= 2 and lines[0] == "Binary" and lines[1] == "Unknown: Unknown":
-        logger.info("DIE output indicates an unknown file (ignoring extra errors).")
         return True
     else:
         return False
@@ -1672,16 +1671,12 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     if is_threat:
         log_scan_result(md5_hash, final_result, from_cache=False)
 
-    # --- CACHE UPDATE ---
+    # --- CACHE UPDATE (in-memory only) ---
     with thread_lock:
         if global_scan_cache.get('_database_state_hash') != db_hash:
             global_scan_cache.clear()
             global_scan_cache['_database_state_hash'] = db_hash
-        global_scan_cache[cache_key] = final_result
-        try:
-            save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
-        except Exception as e:
-            logger.error(f"Failed to save cache: {e}")
+        global_scan_cache[cache_key] = {'final_result': final_result, '_stat': stat_key}
 
     return is_threat, final_result
 
@@ -1713,46 +1708,17 @@ def start_scan(files_to_scan, db_hash, max_workers):
     return scan_results
 
 # ---------------- Main ----------------
+# ---------------- Main ----------------
 def main():
-    """
-    Entrypoint for the HydraDragon antivirus scanner.
-    Initializes engines, discovers files, scans them, and reports all results,
-    including detailed false positive reports, even for YARA-only detections.
-    """
     global excluded_yara_rules, _global_db_state_hash, global_scan_cache, clamav_scanner
 
-    parser = argparse.ArgumentParser(
-        description="HydraDragon Antivirus - Multi-engine scanner with ClamAV + YARA + ML"
-    )
+    parser = argparse.ArgumentParser(description="HydraDragon Antivirus - Multi-engine scanner")
     parser.add_argument("--clear-cache", action="store_true", help="Clear scan cache before starting")
-    parser.add_argument("--max-workers", type=int, default=1000,
-                        help="Maximum number of worker threads for scanning (default: 1000).")
+    parser.add_argument("--max-workers", type=int, default=1000)
     parser.add_argument("path", nargs="?", help="Path to file or directory to scan")
     args = parser.parse_args()
 
-    start_wall = time.perf_counter()
-
-    # --- Privilege Check (Windows Only) ---
-    if os.name == 'nt' and not is_admin():
-        logger.warning("The script is not running with administrative privileges.")
-        print("\n" + "="*60, file=sys.stderr)
-        print("WARNING: Administrative privileges are required for a full scan.", file=sys.stderr)
-        print("Please re-run this script from a terminal with 'Run as administrator'.", file=sys.stderr)
-        print("="*60 + "\n", file=sys.stderr)
-        sys.exit(1)
-
-    # Ensure a sane positive integer for max_workers
-    max_workers = args.max_workers if args.max_workers and args.max_workers > 0 else 1000
-
-    if args.clear_cache and os.path.exists(SCAN_CACHE_FILE):
-        try:
-            os.remove(SCAN_CACHE_FILE)
-            logger.info("Cache cleared manually.")
-        except Exception as e:
-            logger.error(f"Failed to clear cache: {e}")
-
-    # --- PARALLEL INITIALIZATION ---
-    logger.info("Initializing scanner engines in parallel...")
+    # Initialize engines
     with ThreadPoolExecutor(max_workers=4) as executor:
         clamav_future = executor.submit(initialize_clamav)
         yara_future = executor.submit(preload_yara_rules, YARA_RULES_DIR)
@@ -1764,72 +1730,33 @@ def main():
         ml_future.result()
         excluded_yara_rules = set(excluded_rules_future.result())
 
-    logger.info("All scanner engines initialized successfully.")
+    # Compute database hash
+    _global_db_state_hash = get_database_state_hash(
+        os.path.join(script_dir, "clamav", "database"), YARA_RULES_DIR, ML_RESULTS_JSON
+    )
 
-    # Compute database state hash (ClamAV DB, YARA, ML definitions)
-    clamav_db_path = os.path.join(script_dir, "clamav", "database")
-    _global_db_state_hash = get_database_state_hash(clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON)
-    logger.info(f"Current database state hash: {_global_db_state_hash}")
-
-    if not args.path:
-        parser.print_help()
-        sys.exit(0)
-
+    # Discover files
     target = args.path
-    if not os.path.exists(target):
-        logger.critical(f"Target not found: {target}")
-        print(f"ERROR: Target not found: {target}", file=sys.stderr)
-        sys.exit(6)
-
-    # Discover all files to scan
-    logger.info("Discovering all files to get a total count...")
     files_to_scan = list(discover_files_generator(target))
     total_files = len(files_to_scan)
     logger.info(f"Found {total_files} files to scan.")
 
-    # --- Load or initialize scan cache safely ---
-    with thread_lock:
-        try:
-            global_scan_cache = load_scan_cache(SCAN_CACHE_FILE)
-            logger.info("Loaded existing scan cache.")
-        except Exception as e:
-            logger.error(f"Failed to load scan cache ({e}). Creating a new one.")
-            global_scan_cache = {}
+    # --- Load cache only (no reset, no save) ---
+    try:
+        global_scan_cache = load_scan_cache(SCAN_CACHE_FILE)
+        logger.info("Loaded existing scan cache.")
+    except Exception as e:
+        logger.warning(f"Failed to load scan cache ({e}). Creating a new in-memory cache.")
+        global_scan_cache = {'_database_state_hash': _global_db_state_hash}
 
-        if global_scan_cache.get('_database_state_hash') != _global_db_state_hash:
-            logger.info("Database state hash changed. Realtime scan will update cache as files are processed.")
-            global_scan_cache['_database_state_hash'] = _global_db_state_hash
+    # Start scanning
+    scan_results = start_scan(files_to_scan, _global_db_state_hash, args.max_workers)
 
-    # Start scanning using our improved threaded scanner
-    false_positives = []
-    scan_results = start_scan(files_to_scan, _global_db_state_hash, max_workers)
-
-    # Collect files flagged but possibly false positives
-    for file_path, result in scan_results.items():
-        is_threat = result.get('status') == 'threat_found'
-        ml_definition = result['ml_result'].get('definition', 'Unknown')
-        yara_matches = result.get('yara_matches', [])
-
-        # Mark as false positive if:
-        # - ML explicitly says Benign, OR
-        # - Only YARA detects but ML says Unknown and ClamAV is clean
-        clamav_status = result.get('clamav_result', {}).get('status', 'clean')
-
-        if is_threat and (
-            ml_definition == 'Benign' or
-            (len(yara_matches) > 0 and clamav_status == 'clean' and ml_definition == 'Unknown')
-        ):
-            false_positives.append(file_path)
-
-    # Report false positives at the end of scan
-    if false_positives:
-        logger.warning("\n===== FALSE POSITIVE REPORT =====")
-        for fp in false_positives:
-            logger.warning(f"Potential false positive detected: {fp}")
-        logger.warning("================================\n")
-
-    end_wall = time.perf_counter()
-    logger.info(f"Total scan duration: {end_wall - start_wall:.2f} seconds")
+    # Save final cache at the end
+    try:
+        save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
+    except Exception as e:
+        logger.error(f"Failed to save scan cache at end: {e}")
 
 if __name__ == "__main__":
     main()
