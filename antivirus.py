@@ -1797,13 +1797,8 @@ def main():
             global_scan_cache = {}
 
         if global_scan_cache.get('_database_state_hash') != _global_db_state_hash:
-            logger.info("Initializing/Resetting scan cache with current database state hash.")
-            global_scan_cache.clear()
+            logger.info("Database state hash changed. Realtime scan will update cache as files are processed.")
             global_scan_cache['_database_state_hash'] = _global_db_state_hash
-            try:
-                save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
-            except Exception as e:
-                logger.error(f"Failed to save scan cache: {e}")
 
     # Start scanning using our improved threaded scanner
     false_positives = []
