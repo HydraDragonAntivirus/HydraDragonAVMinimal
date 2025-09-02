@@ -1757,6 +1757,12 @@ def start_scan(files_to_scan, db_hash, max_workers):
     logger.info("=" * 50)
 
 # ---------------- Main ----------------
+def main():
+    """
+    Entrypoint for the HydraDragon antivirus scanner.
+    Initializes engines, discovers files, scans them, and reports all results,
+    including false positives.
+    """
     global excluded_yara_rules, _global_db_state_hash, global_scan_cache, clamav_scanner
 
     parser = argparse.ArgumentParser(
@@ -1840,6 +1846,7 @@ def start_scan(files_to_scan, db_hash, max_workers):
             save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
 
     # Start scanning using our improved threaded scanner
+    # The scanner will also log potential false positives and suspicious results
     start_scan(files_to_scan, _global_db_state_hash, max_workers)
 
     end_wall = time.perf_counter()
