@@ -22,7 +22,7 @@ import pefile
 import chardet
 from tqdm import tqdm
 import clamav
-from hydralogvalues import script_dir, log_values
+from hydralogvalues import script_dir, logger
 
 thread_lock = threading.Lock()
 
@@ -111,16 +111,16 @@ def load_scan_cache(filepath: str) -> Dict[str, Any]:
                 return {}
             return json.loads(content)
     except json.JSONDecodeError as e:
-        logging.warning(f"Cache file is corrupted (JSON error): {e}. Starting with fresh cache.")
+        logger.warning(f"Cache file is corrupted (JSON error): {e}. Starting with fresh cache.")
         # Remove the corrupted cache file
         try:
             os.remove(filepath)
-            logging.info(f"Removed corrupted cache file: {filepath}")
+            logger.info(f"Removed corrupted cache file: {filepath}")
         except Exception:
             pass
         return {}
     except Exception as e:
-        logging.warning(f"Could not read cache file: {e}")
+        logger.warning(f"Could not read cache file: {e}")
         return {}
 
 def save_scan_cache(filepath: str, cache: Dict[str, Any]):
@@ -128,7 +128,7 @@ def save_scan_cache(filepath: str, cache: Dict[str, Any]):
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(cache, f, indent=4)
     except Exception as e:
-        logging.error(f"Could not save cache file: {e}")
+        logger.error(f"Could not save cache file: {e}")
 
 # ---------------- YARA preload ----------------
 def preload_yara_rules(rules_dir: str):
@@ -136,7 +136,7 @@ def preload_yara_rules(rules_dir: str):
     for rule_filename in ORDERED_YARA_FILES:
         rule_filepath = os.path.join(rules_dir, rule_filename)
         if not os.path.exists(rule_filepath):
-            logging.info(f"YARA rule not found (skipping): {rule_filepath}")
+            logger.info(f"YARA rule not found (skipping): {rule_filepath}")
             continue
         try:
             if rule_filename == 'yaraxtr.yrc':
@@ -148,9 +148,9 @@ def preload_yara_rules(rules_dir: str):
                 # works for precompiled YARA rules
                 compiled = yara.load(rule_filepath)
                 _global_yara_compiled[rule_filename] = compiled
-            logging.info(f"Preloaded YARA rules: {rule_filename}")
+            logger.info(f"Preloaded YARA rules: {rule_filename}")
         except Exception as e:
-            logging.error(f"Failed to preload YARA rule {rule_filename}: {e}")
+            logger.error(f"Failed to preload YARA rule {rule_filename}: {e}")
 
 clamav_scanner = clamav.Scanner(libclamav_path=libclamav_path, dbpath=clamav_database_directory_path)
 
@@ -160,11 +160,11 @@ def reload_clamav_database():
     Required after updating signatures.
     """
     try:
-        logging.info("Reloading ClamAV database...")
+        logger.info("Reloading ClamAV database...")
         clamav_scanner.loadDB()
-        logging.info("ClamAV database reloaded successfully.")
+        logger.info("ClamAV database reloaded successfully.")
     except Exception as ex:
-        logging.error(f"Failed to reload ClamAV database: {ex}")
+        logger.error(f"Failed to reload ClamAV database: {ex}")
 
 def scan_file_with_clamav(file_path):
     """Scan file using the in-process ClamAV wrapper (scanner) and return virus name or 'Clean'."""
@@ -177,10 +177,10 @@ def scan_file_with_clamav(file_path):
         elif ret == clamav.CL_VIRUS:
             return virus_name or "Infected"
         else:
-            logging.error(f"Unexpected ClamAV scan result for {file_path}: {ret}")
+            logger.error(f"Unexpected ClamAV scan result for {file_path}: {ret}")
             return "Error"
     except Exception as ex:
-        logging.error(f"Error scanning file {file_path}: {ex}")
+        logger.error(f"Error scanning file {file_path}: {ex}")
         return "Error"
 
 # ---------------- DIE heuristics & YARA scanning ----------------
@@ -239,11 +239,11 @@ def analyze_file_with_die(file_path):
 
     except subprocess.SubprocessError as ex:
         error_msg = f"Error in {inspect.currentframe().f_code.co_name} while running Detect It Easy for {file_path}: {ex}"
-        logging.error(error_msg)
+        logger.error(error_msg)
         return None
     except Exception as ex:
         error_msg = f"General error in {inspect.currentframe().f_code.co_name} while running Detect It Easy for {file_path}: {ex}"
-        logging.error(error_msg)
+        logger.error(error_msg)
         return None
 
 def get_die_output_binary(path: str) -> str:
@@ -294,7 +294,7 @@ def is_file_fully_unknown(die_output: str) -> bool:
         Unknown: Unknown
     """
     if not die_output:
-        logging.info("No DIE output provided.")
+        logger.info("No DIE output provided.")
         return False
 
     # Normalize: split into lines, strip whitespace, drop empty lines
@@ -302,7 +302,7 @@ def is_file_fully_unknown(die_output: str) -> bool:
 
     # We only care about the first two markers; ignore anything after.
     if len(lines) >= 2 and lines[0] == "Binary" and lines[1] == "Unknown: Unknown":
-        logging.info("DIE output indicates an unknown file (ignoring extra errors).")
+        logger.info("DIE output indicates an unknown file (ignoring extra errors).")
         return True
     else:
         return False
@@ -315,13 +315,13 @@ def load_excluded_rules(filepath: str) -> List[str]:
         # Load excluded rules from text file
         with open(filepath, "r") as excluded_file:
             excluded_rules = [line.strip() for line in excluded_file if line.strip()]
-            logging.info(f"YARA Excluded Rules loaded: {len(excluded_rules)} rules")
+            logger.info(f"YARA Excluded Rules loaded: {len(excluded_rules)} rules")
             return excluded_rules
     except FileNotFoundError:
-        logging.error(f"Excluded rules file not found: {filepath}")
+        logger.error(f"Excluded rules file not found: {filepath}")
         return []
     except Exception as ex:
-        logging.error(f"Error loading excluded rules: {ex}")
+        logger.error(f"Error loading excluded rules: {ex}")
         return []
 
 def extract_yarax_match_details(rule, source):
@@ -372,7 +372,7 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                             return matched_rules
 
                 except Exception as e:
-                    logging.error(f"Error scanning with {rule_filename}: {e}")
+                    logger.error(f"Error scanning with {rule_filename}: {e}")
 
             # --- yara-python mode ---
             else:
@@ -386,7 +386,7 @@ def scan_file_with_yara_sequentially(file_path: str, excluded_rules: Set[str]) -
                     return matched_rules
 
         except Exception as e:
-            logging.error(f"Error during YARA scan with {rule_filename} on {file_path}: {e}")
+            logger.error(f"Error during YARA scan with {rule_filename} on {file_path}: {e}")
             continue
 
     return matched_rules
@@ -492,7 +492,7 @@ class PEFeatureExtractor:
             analysis['overall_analysis']['is_likely_packed'] = total_add_count > total_mov_count if grand_total_instructions > 0 else False
 
         except Exception as e:
-            logging.error(f"Capstone disassembly failed: {e}")
+            logger.error(f"Capstone disassembly failed: {e}")
             analysis['error'] = str(e)
 
         return analysis
@@ -555,7 +555,7 @@ class PEFeatureExtractor:
 
             return callback_addresses
         except Exception as e:
-            logging.error(f"Error retrieving TLS callback addresses: {e}")
+            logger.error(f"Error retrieving TLS callback addresses: {e}")
             return []
 
     def analyze_tls_callbacks(self, pe) -> Dict[str, Any]:
@@ -583,7 +583,7 @@ class PEFeatureExtractor:
 
             return tls_callbacks
         except Exception as e:
-            logging.error(f"Error analyzing TLS callbacks: {e}")
+            logger.error(f"Error analyzing TLS callbacks: {e}")
             return {}
 
     def analyze_dos_stub(self, pe) -> Dict[str, Any]:
@@ -606,7 +606,7 @@ class PEFeatureExtractor:
 
             return dos_stub
         except Exception as e:
-            logging.error(f"Error analyzing DOS stub: {e}")
+            logger.error(f"Error analyzing DOS stub: {e}")
             return {}
 
     def analyze_certificates(self, pe) -> Dict[str, Any]:
@@ -632,7 +632,7 @@ class PEFeatureExtractor:
 
             return cert_info
         except Exception as e:
-            logging.error(f"Error analyzing certificates: {e}")
+            logger.error(f"Error analyzing certificates: {e}")
             return {}
 
     def analyze_delay_imports(self, pe) -> List[Dict[str, Any]]:
@@ -665,7 +665,7 @@ class PEFeatureExtractor:
 
             return delay_imports
         except Exception as e:
-            logging.error(f"Error analyzing delay imports: {e}")
+            logger.error(f"Error analyzing delay imports: {e}")
             return []
 
     def analyze_load_config(self, pe) -> Dict[str, Any]:
@@ -691,7 +691,7 @@ class PEFeatureExtractor:
 
             return load_config
         except Exception as e:
-            logging.error(f"Error analyzing load config: {e}")
+            logger.error(f"Error analyzing load config: {e}")
             return {}
 
     def analyze_relocations(self, pe) -> List[Dict[str, Any]]:
@@ -722,7 +722,7 @@ class PEFeatureExtractor:
 
             return relocations
         except Exception as e:
-            logging.error(f"Error analyzing relocations: {e}")
+            logger.error(f"Error analyzing relocations: {e}")
             return []
 
     def analyze_bound_imports(self, pe) -> List[Dict[str, Any]]:
@@ -746,13 +746,13 @@ class PEFeatureExtractor:
                             }
                             bound_import['references'].append(reference)
                     else:
-                        logging.warning(f"Bound import {bound_import['name']} has no references.")
+                        logger.warning(f"Bound import {bound_import['name']} has no references.")
 
                     bound_imports.append(bound_import)
 
             return bound_imports
         except Exception as e:
-            logging.error(f"Error analyzing bound imports: {e}")
+            logger.error(f"Error analyzing bound imports: {e}")
             return []
 
     def analyze_section_characteristics(self, pe) -> Dict[str, Dict[str, Any]]:
@@ -790,7 +790,7 @@ class PEFeatureExtractor:
 
             return characteristics
         except Exception as e:
-            logging.error(f"Error analyzing section characteristics: {e}")
+            logger.error(f"Error analyzing section characteristics: {e}")
             return {}
 
     def analyze_extended_headers(self, pe) -> Dict[str, Any]:
@@ -832,7 +832,7 @@ class PEFeatureExtractor:
 
             return headers
         except Exception as e:
-            logging.error(f"Error analyzing extended headers: {e}")
+            logger.error(f"Error analyzing extended headers: {e}")
             return {}
 
     def serialize_data(self, data) -> Any:
@@ -870,7 +870,7 @@ class PEFeatureExtractor:
 
             return rich_header
         except Exception as e:
-            logging.error(f"Error analyzing Rich header: {e}")
+            logger.error(f"Error analyzing Rich header: {e}")
             return {}
 
     def analyze_overlay(self, pe, file_path: str) -> Dict[str, Any]:
@@ -906,7 +906,7 @@ class PEFeatureExtractor:
 
             return overlay_info
         except Exception as e:
-            logging.error(f"Error analyzing overlay: {e}")
+            logger.error(f"Error analyzing overlay: {e}")
             return {}
 
     def extract_numeric_features(self, file_path: str, rank: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -923,12 +923,12 @@ class PEFeatureExtractor:
             except pefile.PEFormatError:
                 return None
             except Exception as ex:
-                logging.error(f"Error loading {file_path} as PE: {str(ex)}", exc_info=True)
+                logger.error(f"Error loading {file_path} as PE: {str(ex)}", exc_info=True)
                 return None
             try:
                 pe.parse_data_directories()
             except Exception:
-                logging.debug(f"pe.parse_data_directories() failed for {file_path}", exc_info=True)
+                logger.debug(f"pe.parse_data_directories() failed for {file_path}", exc_info=True)
 
             # Extract features
             numeric_features = {
@@ -1061,7 +1061,7 @@ class PEFeatureExtractor:
             return numeric_features
 
         except Exception as ex:
-            logging.error(f"Error extracting numeric features from {file_path}: {str(ex)}", exc_info=True)
+            logger.error(f"Error extracting numeric features from {file_path}: {str(ex)}", exc_info=True)
             return None
         finally:
             # ensure PE handle is closed to release underlying file descriptor
@@ -1069,7 +1069,7 @@ class PEFeatureExtractor:
                 if pe is not None:
                     pe.close()
             except Exception:
-                logging.debug(f"Failed to close pe for {file_path}", exc_info=True)
+                logger.debug(f"Failed to close pe for {file_path}", exc_info=True)
 
 pe_extractor = PEFeatureExtractor()
 
@@ -1111,7 +1111,7 @@ def get_cached_pe_features(file_path: str) -> Optional[Dict[str, Any]]:
 
     # Check if we already have features for this MD5
     if file_md5 in unified_pe_cache:
-        logging.debug(f"Using cached features for {file_path} (MD5: {file_md5})")
+        logger.debug(f"Using cached features for {file_path} (MD5: {file_md5})")
         return unified_pe_cache[file_md5]
 
     try:
@@ -1120,7 +1120,7 @@ def get_cached_pe_features(file_path: str) -> Optional[Dict[str, Any]]:
         if features:
             # Cache the result with MD5 as key
             unified_pe_cache[file_md5] = features
-            logging.debug(f"Cached features for {file_path} (MD5: {file_md5})")
+            logger.debug(f"Cached features for {file_path} (MD5: {file_md5})")
             return features
         else:
             # Cache negative result too to avoid re-processing failed files
@@ -1128,7 +1128,7 @@ def get_cached_pe_features(file_path: str) -> Optional[Dict[str, Any]]:
             return None
 
     except Exception as ex:
-        logging.error(f"An error occurred while processing {file_path}: {ex}", exc_info=True)
+        logger.error(f"An error occurred while processing {file_path}: {ex}", exc_info=True)
         # Cache the failure to avoid repeated attempts
         unified_pe_cache[file_md5] = None
         return None
@@ -1136,16 +1136,16 @@ def get_cached_pe_features(file_path: str) -> Optional[Dict[str, Any]]:
 def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
     """Scan a file for malicious activity using machine learning definitions loaded from JSON."""
     malware_definition = "Unknown"
-    logging.info(f"Starting machine learning scan for file: {file_path}")
+    logger.info(f"Starting machine learning scan for file: {file_path}")
 
     try:
         pe = pefile.PE(file_path)
         pe.close()
     except pefile.PEFormatError:
-        logging.error(f"File {file_path} is not a valid PE file. Returning default value 'Unknown'.")
+        logger.error(f"File {file_path} is not a valid PE file. Returning default value 'Unknown'.")
         return False, malware_definition, 0
 
-    logging.info(f"File {file_path} is a valid PE file, proceeding with feature extraction.")
+    logger.info(f"File {file_path} is a valid PE file, proceeding with feature extraction.")
 
     # Use unified cache for feature extraction
     file_numeric_features = get_cached_pe_features(file_path)
@@ -1175,7 +1175,7 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
                 malware_definition = str(info)
                 rank = 'N/A'
 
-            logging.critical(f"Malicious activity detected in {file_path}. Definition: {malware_definition}, similarity: {similarity}, rank: {rank}")
+            logger.critical(f"Malicious activity detected in {file_path}. Definition: {malware_definition}, similarity: {similarity}, rank: {rank}")
 
     # If not malicious, check benign
     if not is_malicious_ml:
@@ -1193,10 +1193,10 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
 
         if nearest_benign_similarity >= 0.93:
             malware_definition = "Benign"
-            logging.info(f"File {file_path} is classified as benign ({benign_definition}) with similarity: {nearest_benign_similarity}")
+            logger.info(f"File {file_path} is classified as benign ({benign_definition}) with similarity: {nearest_benign_similarity}")
         else:
             malware_definition = "Unknown"
-            logging.info(f"File {file_path} is classified as unknown with similarity: {nearest_benign_similarity}")
+            logger.info(f"File {file_path} is classified as unknown with similarity: {nearest_benign_similarity}")
 
     # Return result
     if is_malicious_ml:
@@ -1402,7 +1402,7 @@ def load_ml_definitions(filepath: str) -> bool:
 
     # --- main loader body ---
     if not os.path.exists(filepath):
-        logging.error(f"Machine learning definitions file not found: {filepath}. ML scanning will be disabled.")
+        logger.error(f"Machine learning definitions file not found: {filepath}. ML scanning will be disabled.")
         return False
 
     try:
@@ -1427,11 +1427,11 @@ def load_ml_definitions(filepath: str) -> bool:
             benign_numeric_features.append(numeric)
             benign_file_names.append(filename)
 
-        logging.info(f"[!] Loaded {len(malicious_numeric_features)} malicious and {len(benign_numeric_features)} benign ML definitions (vectors length = {len(malicious_numeric_features[0]) if malicious_numeric_features else 'N/A'}).")
+        logger.info(f"[!] Loaded {len(malicious_numeric_features)} malicious and {len(benign_numeric_features)} benign ML definitions (vectors length = {len(malicious_numeric_features[0]) if malicious_numeric_features else 'N/A'}).")
         return True
 
     except (json.JSONDecodeError, IOError) as e:
-        logging.error(f"Failed to load or parse ML definitions from {filepath}: {e}. ML scanning will be disabled.")
+        logger.error(f"Failed to load or parse ML definitions from {filepath}: {e}. ML scanning will be disabled.")
         return False
 
 # ---------------- Result logging ----------------
@@ -1459,7 +1459,7 @@ def log_scan_result(md5: str, result: dict[str, any], from_cache: bool = False):
     else:
         yara_display = []
     
-    logging.info(
+    logger.info(
         f"\n{'='*50}\n"
         f"!!! MALWARE DETECTED !!! {source}\n"
         f"File MD5: {md5}\n"
@@ -1477,18 +1477,18 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     Process a single file using globals set in main thread.
     """
     if not os.path.exists(file_to_scan):
-        logging.warning(f"File not found: {file_to_scan}")
+        logger.warning(f"File not found: {file_to_scan}")
         return False, None
 
     try:
         size = os.path.getsize(file_to_scan)
         if size == 0:
-            logging.info(f"Skipped empty file: {file_to_scan}")
+            logger.info(f"Skipped empty file: {file_to_scan}")
             return False, None
         st = os.stat(file_to_scan)
         stat_key = f"{st.st_size}:{st.st_mtime_ns}"
     except Exception as e:
-        logging.error(f"Could not stat file {file_to_scan}: {e}")
+        logger.error(f"Could not stat file {file_to_scan}: {e}")
         return False, None
 
     md5_hash = compute_md5(file_to_scan)
@@ -1561,16 +1561,16 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
             current_cache = load_scan_cache(SCAN_CACHE_FILE)
 
             if current_cache.get('_database_state_hash') != db_hash:
-                logging.info(f"Initializing cache with new database state hash: {db_hash}")
+                logger.info(f"Initializing cache with new database state hash: {db_hash}")
                 current_cache = {'_database_state_hash': db_hash}
 
             current_cache[md5_hash] = cacheable_result
 
             try:
                 save_scan_cache(SCAN_CACHE_FILE, current_cache)
-                logging.debug(f"Cached scan result for {os.path.basename(file_to_scan)} (MD5: {md5_hash})")
+                logger.debug(f"Cached scan result for {os.path.basename(file_to_scan)} (MD5: {md5_hash})")
             except Exception as e:
-                logging.error(f"Failed to save cache: {e}")
+                logger.error(f"Failed to save cache: {e}")
 
     return is_threat, potential_fp_info
 
@@ -1585,11 +1585,11 @@ def main():
 
     if args.clear_cache and os.path.exists(SCAN_CACHE_FILE):
         os.remove(SCAN_CACHE_FILE)
-        logging.info("Cache cleared manually.")
+        logger.info("Cache cleared manually.")
 
     clamav_db_path = os.path.join(script_dir, "clamav", "database")
     _global_db_state_hash = get_database_state_hash(clamav_db_path, YARA_RULES_DIR, ML_RESULTS_JSON)
-    logging.info(f"Current database state hash: {_global_db_state_hash}")
+    logger.info(f"Current database state hash: {_global_db_state_hash}")
 
     if not args.path:
         parser.print_help()
@@ -1597,7 +1597,7 @@ def main():
 
     target = args.path
     if not os.path.exists(target):
-        logging.critical(f"Target not found: {target}")
+        logger.critical(f"Target not found: {target}")
         print(f"ERROR: Target not found: {target}", file=sys.stderr)
         sys.exit(6)
 
@@ -1610,7 +1610,7 @@ def main():
         files_to_scan = [target]
 
     total_files = len(files_to_scan)
-    logging.info(f"Discovered {total_files} files")
+    logger.info(f"Discovered {total_files} files")
 
     final_malicious_count = 0
     final_benign_count = 0
@@ -1626,7 +1626,7 @@ def main():
     # Initialize cache with correct database state hash (prevent duplicate warnings)
     cache = load_scan_cache(SCAN_CACHE_FILE)
     if cache.get('_database_state_hash') != _global_db_state_hash:
-        logging.info(f"Database state changed (was {cache.get('_database_state_hash')}, now {_global_db_state_hash}). Initializing cache.")
+        logger.info(f"Database state changed (was {cache.get('_database_state_hash')}, now {_global_db_state_hash}). Initializing cache.")
         cache = {'_database_state_hash': _global_db_state_hash}
         save_scan_cache(SCAN_CACHE_FILE, cache)
 
@@ -1648,7 +1648,7 @@ def main():
                 if fp_info:
                     final_fp_list.append(fp_info)
             except Exception as e:
-                logging.error(f"{fpath} generated exception: {e}")
+                logger.error(f"{fpath} generated exception: {e}")
                 final_benign_count += 1
 
     wall_elapsed = time.perf_counter() - start_wall
