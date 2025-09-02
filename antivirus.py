@@ -1758,7 +1758,7 @@ def main():
     """
     Entrypoint for the HydraDragon antivirus scanner.
     Initializes engines, discovers files, scans them, and reports all results,
-    including false positives.
+    including detailed false positive reports, even for YARA-only detections.
     """
     global excluded_yara_rules, _global_db_state_hash, global_scan_cache, clamav_scanner
 
@@ -1843,8 +1843,32 @@ def main():
             save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
 
     # Start scanning using our improved threaded scanner
-    # The scanner will also log potential false positives and suspicious results
-    start_scan(files_to_scan, _global_db_state_hash, max_workers)
+    false_positives = []
+    scan_results = start_scan(files_to_scan, _global_db_state_hash, max_workers)
+
+    # Collect files flagged but possibly false positives
+    for file_path, result in scan_results.items():
+        is_threat = result.get('status') == 'threat_found'
+        ml_definition = result['ml_result'].get('definition', 'Unknown')
+        yara_matches = result.get('yara_matches', [])
+
+        # Mark as false positive if:
+        # - ML explicitly says Benign, OR
+        # - Only YARA detects but ML says Unknown and ClamAV is clean
+        clamav_status = result.get('clamav_result', {}).get('status', 'clean')
+
+        if is_threat and (
+            ml_definition == 'Benign' or
+            (len(yara_matches) > 0 and clamav_status == 'clean' and ml_definition == 'Unknown')
+        ):
+            false_positives.append(file_path)
+
+    # Report false positives at the end of scan
+    if false_positives:
+        logger.warning("\n===== FALSE POSITIVE REPORT =====")
+        for fp in false_positives:
+            logger.warning(f"Potential false positive detected: {fp}")
+        logger.warning("================================\n")
 
     end_wall = time.perf_counter()
     logger.info(f"Total scan duration: {end_wall - start_wall:.2f} seconds")
