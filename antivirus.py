@@ -296,13 +296,14 @@ def analyze_file_with_die(file_path):
         logger.error(error_msg)
         return None
 
-def get_die_output_binary(path: str) -> str:
+def get_die_output_binary(path: str, file_md5: Optional[str] = None) -> str:
     """
     Returns die_output for a non plain text file, caching by content MD5.
     (Assumes the file isn't plain text, so always calls analyze_file_with_die()
      on cache miss.)
     """
-    file_md5 = compute_md5(path)
+    if file_md5 is None:
+        file_md5 = compute_md5(path)
     if file_md5 in binary_die_cache:
         return binary_die_cache[file_md5]
 
@@ -311,12 +312,13 @@ def get_die_output_binary(path: str) -> str:
     binary_die_cache[file_md5] = die_output
     return die_output
 
-def get_die_output(path: str) -> Tuple[str, bool]:
+def get_die_output(path: str, file_md5: Optional[str] = None) -> Tuple[str, bool]:
     """
     Returns (die_output, plain_text_flag), caching results by content MD5.
     Uses get_die_output_binary() if the file is not plain text.
     """
-    file_md5 = compute_md5(path)
+    if file_md5 is None:
+        file_md5 = compute_md5(path)
     if file_md5 in die_cache:
         return die_cache[file_md5]
 
@@ -328,7 +330,7 @@ def get_die_output(path: str) -> Tuple[str, bool]:
         die_output = "Binary\n    Format: plain text"
         plain_text_flag = True
     else:
-        die_output = get_die_output_binary(path)  # delegate to binary cache
+        die_output = get_die_output_binary(path, file_md5=file_md5)  # delegate to binary cache
         plain_text_flag = False  # skip text detection here
 
     die_cache[file_md5] = (die_output, plain_text_flag)
@@ -1148,14 +1150,15 @@ def calculate_vector_similarity(vec1: List[float], vec2: List[float]) -> float:
 # Unified cache for all PE feature extractions (replaces both worm_scan_cache and any ML cache)
 unified_pe_cache = {}
 
-def get_cached_pe_features(file_path: str) -> Optional[Dict[str, Any]]:
+def get_cached_pe_features(file_path: str, file_md5: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Extract and cache PE file numeric features with unified caching.
     Returns cached features if available, otherwise extracts and caches them.
     Used by both ML scanning and worm detection.
     """
     # Calculate MD5 hash for caching
-    file_md5 = compute_md5(file_path)
+    if file_md5 is None:
+        file_md5 = compute_md5(file_path)
     if not file_md5:
         return None
 
@@ -1183,7 +1186,7 @@ def get_cached_pe_features(file_path: str) -> Optional[Dict[str, Any]]:
         unified_pe_cache[file_md5] = None
         return None
 
-def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
+def scan_file_with_machine_learning_ai(file_path: str, file_md5: Optional[str] = None, threshold=0.86):
     """Scan a file for malicious activity using machine learning definitions loaded from JSON."""
     malware_definition = "Unknown"
     logger.info(f"Starting machine learning scan for file: {file_path}")
@@ -1198,7 +1201,7 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
     logger.info(f"File {file_path} is a valid PE file, proceeding with feature extraction.")
 
     # Use unified cache for feature extraction
-    file_numeric_features = get_cached_pe_features(file_path)
+    file_numeric_features = get_cached_pe_features(file_path, file_md5=file_md5)
     if not file_numeric_features:
         return False, "Feature-Extraction-Failed", 0
 
@@ -1566,6 +1569,12 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
 
             return is_threat, None
 
+    # --- MD5 COMPUTATION (ONCE PER NEW SCAN) ---
+    try:
+        md5_hash = compute_md5(file_to_scan)
+    except Exception:
+        md5_hash = "N/A"
+
     # --- CLAMAV ---
     clamav_result_raw = scan_file_with_clamav(file_to_scan)
     if clamav_result_raw == "Clean":
@@ -1576,7 +1585,7 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
         clamav_res = {'status': 'threat_found', 'signature': clamav_result_raw}
 
     # --- DIE CHECK ---
-    die_output, _ = get_die_output(file_to_scan)
+    die_output, _ = get_die_output(file_to_scan, file_md5=md5_hash)
     if is_file_fully_unknown(die_output):
         final_result = {
             'status': 'clean',
@@ -1603,7 +1612,7 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     ml_result = {'is_malicious': False, 'definition': 'Not Scanned', 'similarity': 0.0}
     if clamav_res.get('status') != 'threat_found' and not yara_matches:
         try:
-            is_malicious, definition, sim = scan_file_with_machine_learning_ai(file_to_scan)
+            is_malicious, definition, sim = scan_file_with_machine_learning_ai(file_to_scan, file_md5=md5_hash)
             ml_result = {
                 'is_malicious': is_malicious,
                 'definition': definition,
@@ -1630,10 +1639,6 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     }
 
     if is_threat:
-        try:
-            md5_hash = compute_md5(file_to_scan)
-        except Exception:
-            md5_hash = "N/A"
         log_scan_result(md5_hash, final_result, from_cache=False)
 
     # --- CACHE UPDATE ---
