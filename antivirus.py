@@ -1526,6 +1526,7 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     """
     Process a single file using globals set in main thread.
     Uses the process-global in-memory cache `global_scan_cache` protected by `thread_lock`.
+    MD5 is computed only when logging or finalizing results (not at the very start).
     """
     if not os.path.exists(file_to_scan):
         logger.warning(f"File not found: {file_to_scan}")
@@ -1542,16 +1543,13 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
         logger.error(f"Could not stat file {file_to_scan}: {e}")
         return False, None
 
-    md5_hash = compute_md5(file_to_scan)
-    if not md5_hash:
-        return False, None
-
-    # --- CACHE CHECK FOR COMPLETE RESULTS (snapshot under lock) ---
+    # --- CACHE CHECK (stat only) ---
     with thread_lock:
-        cache_snapshot = dict(global_scan_cache)  # shallow copy under lock
+        cache_snapshot = dict(global_scan_cache)
 
-    if md5_hash in cache_snapshot:
-        cached_entry = cache_snapshot[md5_hash]
+    cache_key = f"{file_to_scan}:{stat_key}"
+    if cache_key in cache_snapshot:
+        cached_entry = cache_snapshot[cache_key]
         if (cached_entry.get('_stat') == stat_key and
                 'final_result' in cached_entry and
                 cache_snapshot.get('_database_state_hash') == db_hash):
@@ -1560,24 +1558,16 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
             is_threat = cached_result.get('status') == 'threat_found'
 
             if is_threat:
+                try:
+                    md5_hash = compute_md5(file_to_scan)
+                except Exception:
+                    md5_hash = "N/A"
                 log_scan_result(md5_hash, cached_result, from_cache=True)
 
-            # Handle potential false positives from cache
-            potential_fp_info = None
-            yara_matches = cached_result.get('yara_matches', [])
-            if yara_matches and not is_threat:
-                if isinstance(yara_matches, list) and yara_matches:
-                    if isinstance(yara_matches[0], dict):
-                        rules = [match.get('rule', 'UnknownRule') for match in yara_matches]
-                    else:
-                        rules = yara_matches
-                    potential_fp_info = (os.path.basename(file_to_scan), rules)
-
-            return is_threat, potential_fp_info
+            return is_threat, None
 
     # --- CLAMAV ---
     clamav_result_raw = scan_file_with_clamav(file_to_scan)
-    # Convert string result to structured format
     if clamav_result_raw == "Clean":
         clamav_res = {'status': 'clean', 'signature': None}
     elif clamav_result_raw == "Error":
@@ -1588,7 +1578,6 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
     # --- DIE CHECK ---
     die_output, _ = get_die_output(file_to_scan)
     if is_file_fully_unknown(die_output):
-        # Cache the clean result for unknown files
         final_result = {
             'status': 'clean',
             'clamav_result': clamav_res,
@@ -1596,10 +1585,8 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
             'ml_result': {'is_malicious': False, 'definition': 'Unknown File Type', 'similarity': 0.0},
             '_stat': stat_key
         }
-
-        # Cache this result atomically while holding lock
         with thread_lock:
-            global_scan_cache[md5_hash] = {
+            global_scan_cache[cache_key] = {
                 'final_result': final_result,
                 '_stat': stat_key
             }
@@ -1607,7 +1594,6 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
                 save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
             except Exception as e:
                 logger.error(f"Failed to save cache: {e}")
-
         return False, None
 
     # --- YARA ---
@@ -1633,9 +1619,8 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
         or len(yara_matches) > 0
         or ml_result.get('is_malicious', False)
     )
-
-    # Create final result structure
     final_status = 'threat_found' if is_threat else 'clean'
+
     final_result = {
         'status': final_status,
         'clamav_result': clamav_res,
@@ -1644,40 +1629,29 @@ def process_file_worker(file_to_scan: str, db_hash: str) -> Tuple[bool, Optional
         '_stat': stat_key
     }
 
-    # Handle potential false positives
-    potential_fp_info = None
-    if yara_matches and not is_threat:
-        if isinstance(yara_matches, list) and yara_matches:
-            if isinstance(yara_matches[0], dict):
-                rules = [match.get('rule', 'UnknownRule') for match in yara_matches]
-            else:
-                rules = yara_matches
-            potential_fp_info = (os.path.basename(file_to_scan), rules)
-
     if is_threat:
+        try:
+            md5_hash = compute_md5(file_to_scan)
+        except Exception:
+            md5_hash = "N/A"
         log_scan_result(md5_hash, final_result, from_cache=False)
 
-    # --- CACHE UPDATE WITH COMPLETE RESULTS (update global cache + persist) ---
+    # --- CACHE UPDATE ---
     with thread_lock:
-        # initialize db hash if missing
         if global_scan_cache.get('_database_state_hash') != db_hash:
             logger.info(f"Initializing cache with new database state hash: {db_hash}")
             global_scan_cache.clear()
             global_scan_cache['_database_state_hash'] = db_hash
-
-        global_scan_cache[md5_hash] = {
+        global_scan_cache[cache_key] = {
             'final_result': final_result,
             '_stat': stat_key
         }
-
         try:
             save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
-            logger.debug(f"Cached complete scan result for {os.path.basename(file_to_scan)} (MD5: {md5_hash})")
         except Exception as e:
             logger.error(f"Failed to save cache: {e}")
 
-    return is_threat, potential_fp_info
-
+    return is_threat, None
 
 # ---------------- Main ----------------
 def main():
