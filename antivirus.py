@@ -1535,7 +1535,7 @@ def main():
     logger.info("Loading antivirus components...")
     init_start = time.perf_counter()
     
-    with ThreadPoolExecutor(max_workers=4) as init_executor:
+    with ThreadPoolExecutor(max_workers=1000) as init_executor:
         # Submit all initialization tasks in parallel
         yara_future = init_executor.submit(preload_yara_rules, YARA_RULES_DIR)
         excluded_future = init_executor.submit(load_excluded_rules, EXCLUDED_RULES_FILE)
