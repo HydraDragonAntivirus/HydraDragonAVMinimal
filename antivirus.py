@@ -1461,7 +1461,6 @@ def log_scan_result(file_path: str, md5: str, result: Dict[str, any], from_cache
 def scan_file_worker(file_to_scan: str) -> Dict[str, Any]:
     """
     Worker function that scans a single file, checking the cache first.
-    This function now performs the cache check and the scan.
     """
     # --- Initial check and MD5 calculation ---
     if not os.path.exists(file_to_scan) or os.path.getsize(file_to_scan) == 0:
@@ -1475,31 +1474,55 @@ def scan_file_worker(file_to_scan: str) -> Dict[str, Any]:
     if md5_hash in clean_cache:
         return {'status': 'skipped_clean'}
     if md5_hash in infected_cache:
-        return {'status': 'skipped_infected', 'md5': md5_hash, 'details': infected_cache[md5_hash]}
+        return {
+            'status': 'skipped_infected',
+            'md5': md5_hash,
+            'details': infected_cache[md5_hash]
+        }
 
     # --- SCANNING PIPELINE (if not in cache) ---
     clamav_virus_name = scan_file_with_clamav(file_to_scan)
-    yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
     ml_result = {}
+    yara_matches = []
 
-    if clamav_virus_name in ["Clean", "Error"] and not yara_matches:
+    # Run ML only if ClamAV says clean/error
+    if clamav_virus_name in ["Clean", "Error"]:
         is_malicious, definition, sim = scan_file_with_machine_learning_ai(file_to_scan)
-        ml_result = {'is_malicious': is_malicious, 'definition': definition, 'similarity': float(sim)}
+
+        # --- False positive filter ---
+        if is_malicious and sim >= 0.93:
+            # Treat as clean instead of malicious
+            ml_result = {
+                'is_malicious': False,
+                'definition': definition,
+                'similarity': float(sim),
+                'flagged_as_fp': True
+            }
+        else:
+            ml_result = {
+                'is_malicious': is_malicious,
+                'definition': definition,
+                'similarity': float(sim),
+                'flagged_as_fp': False
+            }
+
+    # --- Run YARA last ---
+    yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
 
     # --- FINAL DECISION ---
     is_threat = False
     threat_name = "Clean"
-    
+
     if clamav_virus_name not in ["Clean", "Error"]:
         is_threat = True
         threat_name = f"ClamAV:{clamav_virus_name}"
-    elif yara_matches:
-        is_threat = True
-        threat_name = f"YARA:{yara_matches[0]}"
     elif ml_result.get('is_malicious'):
         is_threat = True
         threat_name = f"ML:{ml_result.get('definition')}"
-    
+    elif yara_matches:
+        is_threat = True
+        threat_name = f"YARA:{yara_matches[0]}"
+
     return {
         'status': 'scanned',
         'md5': md5_hash,
@@ -1574,8 +1597,14 @@ def main():
     start_wall = time.perf_counter()
     with ThreadPoolExecutor(max_workers=1000) as executor:
         futures = {executor.submit(scan_file_worker, f): f for f in all_files}
+        progress_bar = tqdm(as_completed(futures), 
+                            total=total_files, 
+                            desc="Scanning files", 
+                            unit="file",
+                            file=sys.stdout,
+                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]')
 
-        for fut in tqdm(as_completed(futures), total=total_files, desc="Processing files", unit="file"):
+        for fut in progress_bar:
             try:
                 result = fut.result()
                 fpath = futures[fut]
