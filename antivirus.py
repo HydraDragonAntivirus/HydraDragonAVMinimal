@@ -62,6 +62,9 @@ _global_yara_compiled: Dict[str, Any] = {}
 # Globals for worker processes
 excluded_yara_rules = None
 _global_db_state_hash: Optional[str] = None
+# Global cache objects to be passed to workers
+clean_cache: Dict[str, Any] = {}
+infected_cache: Dict[str, Any] = {}
 
 # ---------------- Utility functions ----------------
 def compute_md5(path: str) -> str:
@@ -1138,16 +1141,11 @@ def get_cached_pe_features(file_path: str) -> Optional[Dict[str, Any]]:
 def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
     """Scan a file for malicious activity using machine learning definitions loaded from JSON."""
     malware_definition = "Unknown"
-    logger.info(f"Starting machine learning scan for file: {file_path}")
-
     try:
         pe = pefile.PE(file_path)
         pe.close()
     except pefile.PEFormatError:
-        logger.error(f"File {file_path} is not a valid PE file. Returning default value 'Unknown'.")
         return False, malware_definition, 0
-
-    logger.info(f"File {file_path} is a valid PE file, proceeding with feature extraction.")
 
     # Use unified cache for feature extraction
     file_numeric_features = get_cached_pe_features(file_path)
@@ -1437,7 +1435,7 @@ def load_ml_definitions(filepath: str) -> bool:
         return False
 
 # ---------------- Result logging ----------------
-def log_scan_result(md5: str, result: Dict[str, any], from_cache: bool = False):
+def log_scan_result(file_path: str, md5: str, result: Dict[str, any], from_cache: bool = False):
     """Logs a formatted message for a detected threat."""
     source = "(From Cache)" if from_cache else "(New Scan)"
     threat_name = result.get('threat_name', 'Unknown Threat')
@@ -1452,6 +1450,7 @@ def log_scan_result(md5: str, result: Dict[str, any], from_cache: bool = False):
     logger.info(
         f"\n{'='*50}\n"
         f"!!! MALWARE DETECTED !!! {source}\n"
+        f"File Path: {file_path}\n"
         f"File MD5: {md5}\n"
         f"Detection: {threat_name}\n"
         f"Details: {' | '.join(details) if details else 'N/A'}\n"
@@ -1461,30 +1460,32 @@ def log_scan_result(md5: str, result: Dict[str, any], from_cache: bool = False):
 # ---------------- Per-file Processing ----------------
 def scan_file_worker(file_to_scan: str) -> Dict[str, Any]:
     """
-    Worker function that scans a single file and returns a result dictionary.
-    This function performs NO caching itself; it only returns the scan outcome.
+    Worker function that scans a single file, checking the cache first.
+    This function now performs the cache check and the scan.
     """
+    # --- Initial check and MD5 calculation ---
     if not os.path.exists(file_to_scan) or os.path.getsize(file_to_scan) == 0:
-        return {'md5': '', 'is_threat': False}
+        return {'status': 'error', 'reason': 'File not found or empty'}
 
     md5_hash = compute_md5(file_to_scan)
     if not md5_hash:
-        return {'md5': '', 'is_threat': False}
+        return {'status': 'error', 'reason': 'Could not compute MD5'}
 
-    # --- SCANNING PIPELINE ---
-    
-    # ClamAV Scan
+    # --- CACHE CHECK ---
+    if md5_hash in clean_cache:
+        return {'status': 'skipped_clean'}
+    if md5_hash in infected_cache:
+        return {'status': 'skipped_infected', 'md5': md5_hash, 'details': infected_cache[md5_hash]}
+
+    # --- SCANNING PIPELINE (if not in cache) ---
     clamav_virus_name = scan_file_with_clamav(file_to_scan)
-    
-    # YARA Scan
     yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
-
-    # Machine Learning Scan (only if other methods find nothing)
     ml_result = {}
+
     if clamav_virus_name in ["Clean", "Error"] and not yara_matches:
         is_malicious, definition, sim = scan_file_with_machine_learning_ai(file_to_scan)
         ml_result = {'is_malicious': is_malicious, 'definition': definition, 'similarity': float(sim)}
-    
+
     # --- FINAL DECISION ---
     is_threat = False
     threat_name = "Clean"
@@ -1494,12 +1495,13 @@ def scan_file_worker(file_to_scan: str) -> Dict[str, Any]:
         threat_name = f"ClamAV:{clamav_virus_name}"
     elif yara_matches:
         is_threat = True
-        threat_name = f"YARA:{yara_matches[0]}"  # Primary name from the first YARA match
+        threat_name = f"YARA:{yara_matches[0]}"
     elif ml_result.get('is_malicious'):
         is_threat = True
         threat_name = f"ML:{ml_result.get('definition')}"
     
     return {
+        'status': 'scanned',
         'md5': md5_hash,
         'is_threat': is_threat,
         'threat_name': threat_name,
@@ -1511,8 +1513,9 @@ def scan_file_worker(file_to_scan: str) -> Dict[str, Any]:
 def main():
     global excluded_yara_rules, _global_db_state_hash
     global malicious_numeric_features, malicious_file_names, benign_numeric_features, benign_file_names
-    
-    parser = argparse.ArgumentParser(description="HydraDragon Antivirus with separated, minimal caching.")
+    global clean_cache, infected_cache
+
+    parser = argparse.ArgumentParser(description="HydraDragon Antivirus with integrated, on-the-fly caching.")
     parser.add_argument("--clear-cache", action="store_true", help="Clear all scan caches before starting.")
     parser.add_argument("path", nargs="?", help="Path to file or directory to scan.")
     args = parser.parse_args()
@@ -1532,7 +1535,7 @@ def main():
     excluded_yara_rules = set(load_excluded_rules(EXCLUDED_RULES_FILE))
     load_ml_definitions(ML_RESULTS_JSON)
 
-    # --- CACHE VALIDATION ---
+    # --- CACHE VALIDATION AND LOADING ---
     _global_db_state_hash = get_database_state_hash(
         clamav_database_directory_path, YARA_RULES_DIR, ML_RESULTS_JSON
     )
@@ -1540,17 +1543,14 @@ def main():
 
     saved_state = load_json_cache(DB_STATE_FILE)
     if saved_state.get('hash') != _global_db_state_hash:
-        logger.warning("Database state has changed. Invalidating and clearing caches.")
-        if os.path.exists(CLEAN_CACHE_FILE): os.remove(CLEAN_CACHE_FILE)
-        if os.path.exists(INFECTED_CACHE_FILE): os.remove(INFECTED_CACHE_FILE)
-        clean_cache = {}
-        infected_cache = {}
+        logger.warning("Database state has changed. Caches will be ignored and overwritten.")
+        clean_cache, infected_cache = {}, {}
     else:
         clean_cache = load_json_cache(CLEAN_CACHE_FILE)
         infected_cache = load_json_cache(INFECTED_CACHE_FILE)
     logger.info(f"Loaded {len(clean_cache)} clean and {len(infected_cache)} infected hashes from cache.")
 
-    # --- FILE DISCOVERY AND FILTERING ---
+    # --- FILE DISCOVERY ---
     target = args.path
     if not os.path.exists(target):
         logger.critical(f"Target not found: {target}")
@@ -1564,57 +1564,47 @@ def main():
     else:
         all_files = [target]
     
-    logger.info(f"Discovered {len(all_files)} total files.")
-
-    files_needing_scan = []
+    total_files = len(all_files)
+    logger.info(f"Discovered {total_files} total files to process.")
+    
     final_malicious_count = 0
     final_benign_count = 0
     
-    # Filter out files that are already in the cache
-    for f in tqdm(all_files, desc="Checking cache", unit="file"):
-        md5 = compute_md5(f)
-        if not md5:
-            continue
-        
-        if md5 in clean_cache:
-            final_benign_count += 1
-            continue
-        if md5 in infected_cache:
-            log_scan_result(md5, infected_cache[md5], from_cache=True)
-            final_malicious_count += 1
-            continue
-        
-        files_needing_scan.append(f)
-        
-    logger.info(f"{len(files_needing_scan)} files require a new scan.")
-    
     # --- SCANNING ---
     start_wall = time.perf_counter()
-    if files_needing_scan:
-        with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as executor:
-            futures = {executor.submit(scan_file_worker, f): f for f in files_needing_scan}
+    with ThreadPoolExecutor(max_workers=1000) as executor:
+        futures = {executor.submit(scan_file_worker, f): f for f in all_files}
 
-            for fut in tqdm(as_completed(futures), total=len(files_needing_scan), desc="Scanning files", unit="file"):
-                try:
-                    result = fut.result()
-                    if not result or not result.get('md5'):
-                        continue
+        for fut in tqdm(as_completed(futures), total=total_files, desc="Processing files", unit="file"):
+            try:
+                result = fut.result()
+                fpath = futures[fut]
+                status = result.get('status')
 
+                if status == 'skipped_clean':
+                    final_benign_count += 1
+                elif status == 'skipped_infected':
+                    final_malicious_count += 1
+                    log_scan_result(fpath, result['md5'], result['details'], from_cache=True)
+                elif status == 'scanned':
                     if result['is_threat']:
                         final_malicious_count += 1
-                        infected_cache[result['md5']] = {
+                        threat_details = {
                             'threat_name': result['threat_name'],
                             'yara_rules': result['yara_rules'],
                             'ml_result': result['ml_result']
                         }
-                        log_scan_result(result['md5'], infected_cache[result['md5']], from_cache=False)
+                        infected_cache[result['md5']] = threat_details
+                        log_scan_result(fpath, result['md5'], threat_details, from_cache=False)
                     else:
                         final_benign_count += 1
                         clean_cache[result['md5']] = True
+                # 'error' status is ignored in counts but logged by worker
 
-                except Exception as e:
-                    logger.error(f"A file scan generated an exception: {e}")
-                    final_benign_count += 1
+            except Exception as e:
+                fpath = futures[fut]
+                logger.error(f"Scan for {fpath} generated an exception: {e}")
+                final_benign_count += 1 # Count exceptions as benign for summary
 
     wall_elapsed = time.perf_counter() - start_wall
     
@@ -1631,8 +1621,8 @@ def main():
     print("=" * 60)
     print(f"Total Malicious Files Found: {final_malicious_count}")
     print(f"Total Clean Files Found: {final_benign_count}")
-    print(f"Total Files Processed: {len(all_files)}")
-    print(f"Wall-clock Scan Time (for new files): {wall_elapsed:.2f}s")
+    print(f"Total Files Processed: {total_files}")
+    print(f"Wall-clock Total Execution Time: {wall_elapsed:.2f}s")
     print("=" * 60)
 
 if __name__ == "__main__":
