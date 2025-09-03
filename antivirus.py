@@ -1436,17 +1436,25 @@ def load_ml_definitions(filepath: str) -> bool:
 
 # ---------------- Result logging ----------------
 def log_scan_result(file_path: str, md5: str, result: Dict[str, any], from_cache: bool = False):
-    """Logs a formatted message for a detected threat."""
+    """Logs a formatted message for a detected threat.
+       If YARA detects something, also record it separately for FP analysis.
+    """
     source = "(From Cache)" if from_cache else "(New Scan)"
     threat_name = result.get('threat_name', 'Unknown Threat')
-    
+
     details = []
-    if result.get('yara_rules'):
-        details.append(f"YARA: {', '.join(result['yara_rules'])}")
-    if result.get('ml_result', {}).get('is_malicious'):
-        ml_info = result['ml_result']
+    yara_rules = result.get('yara_rules', [])
+    ml_info = result.get('ml_result', {})
+
+    # ML details
+    if ml_info.get('is_malicious'):
         details.append(f"ML: {ml_info.get('definition')} (Similarity: {ml_info.get('similarity', 0):.2f})")
 
+    # YARA details (always logged last)
+    if yara_rules:
+        details.append(f"YARA: {', '.join(yara_rules)}")
+
+    # --- Main logging ---
     logger.info(
         f"\n{'='*50}\n"
         f"!!! MALWARE DETECTED !!! {source}\n"
@@ -1456,6 +1464,18 @@ def log_scan_result(file_path: str, md5: str, result: Dict[str, any], from_cache
         f"Details: {' | '.join(details) if details else 'N/A'}\n"
         f"{'='*50}"
     )
+
+    # --- Extra handling: if YARA flagged something, write to FP log file ---
+    if yara_rules:
+        fp_log_path = "yara_falsepositives.log"
+        try:
+            with open(fp_log_path, "a", encoding="utf-8") as fp_log:
+                fp_log.write(
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S')} | "
+                    f"File: {file_path} | MD5: {md5} | YARA Rules: {', '.join(yara_rules)}\n"
+                )
+        except Exception as e:
+            logger.error(f"Could not write YARA FP log: {e}")
 
 # ---------------- Per-file Processing ----------------
 def scan_file_worker(file_to_scan: str) -> Dict[str, Any]:
