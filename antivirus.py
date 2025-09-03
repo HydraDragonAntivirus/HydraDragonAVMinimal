@@ -1586,73 +1586,63 @@ def main():
                 all_files.append(os.path.join(root, fname))
     else:
         all_files = [target]
-    
+
     total_files = len(all_files)
     logger.info(f"Discovered {total_files} total files to process.")
-    
+
     final_malicious_count = 0
     final_benign_count = 0
-    
+
     # --- SCANNING ---
     start_wall = time.perf_counter()
     with ThreadPoolExecutor(max_workers=1000) as executor:
         futures = {executor.submit(scan_file_worker, f): f for f in all_files}
-        progress_bar = tqdm(as_completed(futures), 
-                            total=total_files, 
-                            desc="Scanning files", 
+
+        # tqdm progress bar
+        progress_bar = tqdm(total=total_files,
+                            desc="Scanning files",
                             unit="file",
                             file=sys.stdout,
                             bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]')
 
-        for fut in progress_bar:
+        for fut in as_completed(futures):
+            fpath = futures[fut]
             try:
                 result = fut.result()
-                fpath = futures[fut]
                 status = result.get('status')
 
                 if status == 'skipped_clean':
                     final_benign_count += 1
+
                 elif status == 'skipped_infected':
                     final_malicious_count += 1
                     log_scan_result(fpath, result['md5'], result['details'], from_cache=True)
+
                 elif status == 'scanned':
                     if result['is_threat']:
                         final_malicious_count += 1
                         threat_details = {
                             'threat_name': result['threat_name'],
                             'yara_rules': result['yara_rules'],
-                            'ml_result': result['ml_result']
+                            'ml_result': result['ml_result'],
                         }
-                        infected_cache[result['md5']] = threat_details
-                        log_scan_result(fpath, result['md5'], threat_details, from_cache=False)
+                        log_scan_result(fpath, result['md5'], threat_details)
                     else:
                         final_benign_count += 1
                         clean_cache[result['md5']] = True
-                # 'error' status is ignored in counts but logged by worker
 
             except Exception as e:
-                fpath = futures[fut]
-                logger.error(f"Scan for {fpath} generated an exception: {e}")
-                final_benign_count += 1 # Count exceptions as benign for summary
+                logger.error(f"Error scanning {fpath}: {e}")
 
-    wall_elapsed = time.perf_counter() - start_wall
-    
-    # --- SAVE UPDATED CACHES ---
-    logger.info("Saving updated caches...")
-    save_json_cache(CLEAN_CACHE_FILE, clean_cache)
-    save_json_cache(INFECTED_CACHE_FILE, infected_cache)
-    save_json_cache(DB_STATE_FILE, {'hash': _global_db_state_hash})
-    logger.info("Caches saved.")
+            finally:
+                # Always update tqdm
+                progress_bar.update(1)
 
-    # --- FINAL SUMMARY ---
-    print("\n" + "=" * 60)
-    print("FINAL SCAN SUMMARY")
-    print("=" * 60)
-    print(f"Total Malicious Files Found: {final_malicious_count}")
-    print(f"Total Clean Files Found: {final_benign_count}")
-    print(f"Total Files Processed: {total_files}")
-    print(f"Wall-clock Total Execution Time: {wall_elapsed:.2f}s")
-    print("=" * 60)
+        progress_bar.close()
+
+    elapsed = time.perf_counter() - start_wall
+    logger.info(f"Scan completed in {elapsed:.2f}s. "
+                f"Malicious: {final_malicious_count}, Benign: {final_benign_count}")
 
 if __name__ == "__main__":
     main()
