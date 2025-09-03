@@ -1076,34 +1076,32 @@ class PEFeatureExtractor:
 
 pe_extractor = PEFeatureExtractor()
 
-def calculate_vector_similarity(vec1: List[float], vec2: List[float]) -> float:
-    """Calculates similarity between two numeric vectors using cosine similarity."""
-    if not vec1 or not vec2 or len(vec1) != len(vec2):
+def calculate_similarity(features1: dict, features2: dict) -> float:
+    """
+    Calculate similarity between two feature dictionaries.
+    Similarity = (# of matching keys with equal values) / max(len(features1), len(features2))
+    Returns a value between 0 and 1.
+    """
+    if not features1 or not features2:
         return 0.0
 
-    # Convert to numpy arrays for vector operations
-    vec1 = np.array(vec1, dtype=np.float64)
-    vec2 = np.array(vec2, dtype=np.float64)
+    # Find keys that exist in both dicts
+    common_keys = set(features1.keys()) & set(features2.keys())
 
-    # Calculate cosine similarity
-    dot_product = np.dot(vec1, vec2)
-    norm_vec1 = np.linalg.norm(vec1)
-    norm_vec2 = np.linalg.norm(vec2)
+    # Count keys where values are exactly equal
+    matching_keys = sum(1 for key in common_keys if features1[key] == features2[key])
 
-    if norm_vec1 == 0 or norm_vec2 == 0:
-        return 1.0 if norm_vec1 == norm_vec2 else 0.0
+    # Normalize by the size of the larger dict
+    similarity = matching_keys / max(len(features1), len(features2))
 
-    # The result of dot_product / (norm_vec1 * norm_vec2) is between -1 and 1.
-    # We scale it to be in the [0, 1] range for easier interpretation.
-    cosine_similarity = dot_product / (norm_vec1 * norm_vec2)
-    return (cosine_similarity + 1) / 2
+    return similarity
 
 # Unified cache for all PE feature extractions (replaces both worm_scan_cache and any ML cache)
 unified_pe_cache = {}
 
 def get_cached_pe_features(file_path: str) -> Optional[Dict[str, Any]]:
     """
-    Extract and cache PE file numeric features with unified caching.
+    Extract and cachea PE file numeric features with unified caching.
     Returns cached features if available, otherwise extracts and caches them.
     Used by both ML scanning and worm detection.
     """
@@ -1156,7 +1154,7 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
 
     # Check malicious definitions
     for ml_feats, info in zip(malicious_numeric_features, malicious_file_names):
-        similarity = calculate_vector_similarity(file_numeric_features, ml_feats)
+        similarity = calculate_similarity(file_numeric_features, ml_feats)
         nearest_malicious_similarity = max(nearest_malicious_similarity, similarity)
 
         if similarity >= threshold:
@@ -1178,7 +1176,7 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
     # If not malicious, check benign
     if not is_malicious_ml:
         for ml_feats, info in zip(benign_numeric_features, benign_file_names):
-            similarity = calculate_vector_similarity(file_numeric_features, ml_feats)
+            similarity = calculate_similarity(file_numeric_features, ml_feats)
             nearest_benign_similarity = max(nearest_benign_similarity, similarity)
 
             # Handle both string and dict cases
@@ -1201,6 +1199,99 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
         return True, malware_definition, nearest_malicious_similarity
     else:
         return False, malware_definition, nearest_benign_similarity
+
+def scan_file_ml(
+    file_path: str,
+    *,
+    pe_file: bool = False,
+    signature_check: Optional[Dict[str, Any]] = None,
+    benign_threshold: float = 0.93,
+) -> Dict[str, Any]:
+    """
+    Perform ML-only scan and return structured result.
+
+    Returns a dict with the following keys:
+      - malware_found: bool            # True if ML declares malware
+      - virus_name: str                # malware name, "Benign", or "Clean"
+      - engine: str                    # "ML" when ML provided a result, else ""
+      - benign: bool                   # True when ML explicitly marks benign
+      - benign_score: Optional[float]  # score from ML (0.0 - 1.0) or None
+      - matched_rules: Optional[list]  # matched rule names or None
+      - error: Optional[str]           # error message if exception occurred
+    Notes:
+      - ML runs only if `pe_file` is True (consistent with previous behavior).
+      - signature_check may be a dict with "is_valid" key; if True, a ".SIG"
+        suffix will be appended to `virus_name` when malware is detected.
+      - `benign_threshold` controls what ML score counts as benign.
+    """
+    result = {
+        'malware_found': False,
+        'virus_name': 'Clean',
+        'engine': '',
+        'benign': False,
+        'benign_score': None,
+        'matched_rules': None,
+        'error': None,
+    }
+
+    try:
+        if not pe_file:
+            logger.debug("ML scan skipped: not a PE file: %s", file_path)
+            return result
+
+        # It should return:
+        # (is_malicious_machine_learning: bool, malware_definition: str,
+        #  benign_score: float, matched_rules: list)
+        ml_out = scan_file_with_machine_learning_ai(file_path)
+        if not isinstance(ml_out, (list, tuple)) or len(ml_out) < 4:
+            raise ValueError("scan_file_with_machine_learning_ai returned unexpected shape")
+
+        is_malicious_machine_learning, malware_definition, benign_score, matched_rules = ml_out
+
+        result['benign_score'] = benign_score
+        result['matched_rules'] = matched_rules
+        result['engine'] = 'ML'
+
+        sig_valid = bool(signature_check and signature_check.get("is_valid", False))
+
+        # ML reported something (could be malware or high-score benign)
+        if is_malicious_machine_learning:
+            # nil-safe clamp for benign_score
+            if benign_score is None:
+                benign_score = 0.0
+            # Decide malware vs benign using threshold
+            if benign_score < benign_threshold:
+                # ML -> malware
+                if sig_valid and isinstance(malware_definition, str):
+                    malware_definition = f"{malware_definition}.SIG"
+                result.update({
+                    'malware_found': True,
+                    'virus_name': malware_definition,
+                    'benign': False
+                })
+                logger.critical("Infected file detected (ML): %s - Virus: %s", file_path, malware_definition)
+            else:
+                # ML -> benign
+                result.update({
+                    'malware_found': False,
+                    'virus_name': 'Benign',
+                    'benign': True
+                })
+                logger.info("File marked benign by ML (score=%s): %s", benign_score, file_path)
+        else:
+            # ML had no opinion / clean
+            logger.info("No malware detected by ML: %s", file_path)
+
+        return result
+
+    except Exception as ex:
+        # Never raise here to keep worker wrappers simple - return error metadata
+        err_msg = f"ML scan error: {ex}"
+        logger.error(err_msg)
+        result['error'] = err_msg
+        # keep virus_name 'Clean' to avoid false positive on upstream
+        result['engine'] = 'ML'
+        return result
 
 # Load ML definitions
 
@@ -1451,8 +1542,9 @@ def log_scan_result(file_path: str, md5: str, threat_name: str, yara_rules: list
 def scan_file_worker(file_to_scan: str) -> tuple:
     """
     Worker function that scans a single file.
-    Returns only essential info: (file_path, threat_name, md5, yara_rules)
+    Returns essential info: (file_path, threat_name, md5, yara_rules)
     """
+
     # --- Initial check and MD5 calculation ---
     if not os.path.exists(file_to_scan) or os.path.getsize(file_to_scan) == 0:
         return (file_to_scan, "Error: File not found or empty", None, [])
@@ -1469,11 +1561,26 @@ def scan_file_worker(file_to_scan: str) -> tuple:
         threat_name = f"ClamAV:{clamav_virus_name}"
     else:
         # Only run ML/YARA if ClamAV is clean
-        is_malicious, definition, sim = scan_file_with_machine_learning_ai(file_to_scan)
-        
-        if is_malicious and sim < 0.93:  # Not flagged as FP
-            threat_name = f"ML:{definition}"
+        try:
+            ml_res = scan_file_ml(file_to_scan, pe_file=True, signature_check=None, benign_threshold=0.93)
+        except Exception as e:
+            logger.warning(f"ML scan failed for {file_to_scan}: {e}")
+            ml_res = None
+
+        if ml_res:
+            if ml_res.get("malware_found"):
+                threat_name = f"ML:{ml_res.get('virus_name', 'Unknown')}"
+            elif ml_res.get("benign"):
+                threat_name = "Clean"  # ML white-listed / benign
+            else:
+                # ML gave no opinion or error -> fallback to YARA
+                yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
+                if yara_matches:
+                    threat_name = f"YARA:{yara_matches[0]}"
+                else:
+                    threat_name = "Clean"
         else:
+            # fallback if ML fails entirely
             yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
             if yara_matches:
                 threat_name = f"YARA:{yara_matches[0]}"
