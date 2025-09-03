@@ -30,6 +30,7 @@ YARA_RULES_DIR = os.path.join(script_dir, 'yara')
 EXCLUDED_RULES_FILE = os.path.join(script_dir, 'excluded', 'excluded_rules.txt')
 ML_RESULTS_JSON = os.path.join(script_dir, 'machine_learning', 'results.json')
 SCAN_CACHE_FILE = os.path.join(script_dir, 'scan_cache.json')
+DB_HASH_FILE = os.path.join(script_dir, 'db_hash.txt')
 
 # ClamAV base folder path
 clamav_folder = os.path.join(script_dir, "ClamAV")
@@ -59,6 +60,7 @@ _global_yara_compiled: Dict[str, Any] = {}
 excluded_yara_rules = None
 _global_db_state_hash: Optional[str] = None
 clamav_scanner: Optional[clamav.Scanner] = None
+global_scan_cache: Dict[str, Any] = {}
 
 # ---------------- Utility functions ----------------
 def is_admin():
@@ -105,6 +107,25 @@ def get_database_state_hash(clamav_db_path: str, yara_rules_dir: str, ml_defs_pa
                 continue # Ignore files we can't access
     
     return hasher.hexdigest()
+
+def load_db_hash(filepath: str) -> Optional[str]:
+    """Loads the database state hash from its dedicated file."""
+    if not os.path.exists(filepath):
+        return None
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.warning(f"Could not read database hash file: {e}")
+        return None
+
+def save_db_hash(filepath: str, hash_string: str) -> None:
+    """Saves the database state hash to its dedicated file."""
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(hash_string)
+    except Exception as e:
+        logger.error(f"Could not save database hash file: {e}")
 
 def load_scan_cache(filepath: str, lock: threading.Lock = thread_lock) -> Dict[str, Any]:
     """
@@ -159,30 +180,27 @@ def load_scan_cache(filepath: str, lock: threading.Lock = thread_lock) -> Dict[s
 
 def save_scan_cache(filepath: str, cache: Dict[str, Any], lock: threading.Lock = thread_lock) -> None:
     """
-    Atomically write cache to disk using a temp file and os.replace.
-    Caller may pass a lock (defaults to module thread_lock) to protect against concurrent threads.
+    Atomically write cache to disk using a temporary file and os.replace.
+    This version avoids the `tempfile` module.
     """
-    # Make sure target dir exists
     dest_dir = os.path.dirname(filepath) or "."
     os.makedirs(dest_dir, exist_ok=True)
 
-    tmp_fd = None
-    tmp_path = None
+    tmp_path = filepath + ".tmp"
     with lock:
         try:
-            # Use tempfile in same directory for atomic replace on same filesystem
-            fd, tmp_path = tempfile.mkstemp(prefix=".cache-", dir=dest_dir, text=True)
-            tmp_fd = fd
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            # Write to the temporary file
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(cache, f, ensure_ascii=False, indent=2)
                 f.flush()
-                os.fsync(f.fileno())   # ensure data hit disk
-            # atomic replace
+                os.fsync(f.fileno())  # Ensure data is written to disk
+
+            # Atomically replace the original file with the temporary one
             os.replace(tmp_path, filepath)
         except Exception as e:
             logger.error(f"Could not save cache file atomically: {e}")
-            # cleanup tmp if needed
-            if tmp_path and os.path.exists(tmp_path):
+            # Clean up the temporary file if it still exists
+            if os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
                 except Exception:
@@ -1579,7 +1597,10 @@ def discover_files_generator(target_path: str) -> Generator[str, None, None]:
         yield target_path
 
 # ------------------ Worker (uses in-memory cache only) ------------------
-def process_file_worker(file_to_scan: str, db_hash: str):
+def process_file_worker(file_to_scan: str):
+    """
+    Processes a single file: checks cache, runs scans if needed, and updates in-memory cache.
+    """
     if not os.path.exists(file_to_scan):
         return False, None
 
@@ -1592,15 +1613,16 @@ def process_file_worker(file_to_scan: str, db_hash: str):
     cache_key = f"{file_to_scan}:{stat_key}"
 
     # --- Check cache in memory only ---
+    # The validity of the entire cache against database hashes is checked once in main().
     with thread_lock:
         cached_entry = global_scan_cache.get(cache_key)
-        if cached_entry and cached_entry.get('_stat') == stat_key and \
-           global_scan_cache.get('_database_state_hash') == db_hash:
-            # Minimal cache: if clean, return immediately
-            if cached_entry.get('final_result', {}).get('status') == 'clean':
-                return False, None
+        if cached_entry and cached_entry.get('_stat') == stat_key:
+            final_result = cached_entry.get('final_result', {})
+            is_threat = final_result.get('status') == 'threat_found'
+            if is_threat:
+                return True, final_result
             else:
-                return True, cached_entry['final_result']
+                return False, None # Return clean status without full result object
 
     # --- Compute MD5 ---
     try:
@@ -1627,18 +1649,17 @@ def process_file_worker(file_to_scan: str, db_hash: str):
         'status': 'threat_found' if is_threat else 'clean',
         'clamav_result': clamav_res if is_threat else None,
         'yara_matches': yara_matches if is_threat else None,
-        'ml_result': {'is_malicious': is_malicious, 'definition': ml_def, 'similarity': sim} if is_threat else None,
-        '_stat': stat_key
+        'ml_result': {'is_malicious': is_malicious, 'definition': ml_def, 'similarity': sim} if is_threat else None
     }
 
     # --- Update in-memory cache ---
     with thread_lock:
         global_scan_cache[cache_key] = {'final_result': final_result, '_stat': stat_key}
 
-    return is_threat, final_result
+    return is_threat, final_result if is_threat else None
 
 # ------------------ Scan Runner ------------------
-def start_scan(files_to_scan, db_hash, max_workers):
+def start_scan(files_to_scan, max_workers):
     total_files = len(files_to_scan)
     logger.info(f"Starting scan on {total_files} files...")
 
@@ -1647,21 +1668,17 @@ def start_scan(files_to_scan, db_hash, max_workers):
     scan_results = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # executor.map ile futures oluşturuyoruz
-        results_iterator = executor.map(lambda f: (f, process_file_worker(f, db_hash)), files_to_scan)
+        # Create futures for all file processing tasks
+        results_iterator = executor.map(lambda f: (f, process_file_worker(f)), files_to_scan)
 
+        # Process results as they complete
         for file_path, (is_threat, result) in tqdm(results_iterator, total=total_files, desc="Scanning files", unit="file"):
-            scan_results[file_path] = result
             scanned_files += 1
-            if is_threat:
+            if is_threat and result:
+                scan_results[file_path] = result
                 malicious_count += 1
-
-    # --- Save cache once at the end ---
-    try:
-        save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
-        logger.info("Scan cache saved successfully at the end of scan.")
-    except Exception as e:
-        logger.error(f"Failed to save cache at end of scan: {e}")
+    
+    # Note: Cache is saved in the main() function after this function returns.
 
     logger.info("="*50)
     logger.info(f"Scanning complete. {scanned_files}/{total_files} files scanned.")
@@ -1671,7 +1688,7 @@ def start_scan(files_to_scan, db_hash, max_workers):
 
 # ---------------- Main ----------------
 def main():
-    global excluded_yara_rules, _global_db_state_hash, global_scan_cache, clamav_scanner
+    global excluded_yara_rules, global_scan_cache, clamav_scanner
 
     parser = argparse.ArgumentParser(description="HydraDragon Antivirus - Multi-engine scanner")
     parser.add_argument("--clear-cache", action="store_true", help="Clear scan cache before starting")
@@ -1679,7 +1696,7 @@ def main():
     parser.add_argument("path", nargs="?", help="Path to file or directory to scan")
     args = parser.parse_args()
 
-    # Initialize engines
+    # Initialize engines in parallel
     with ThreadPoolExecutor(max_workers=4) as executor:
         clamav_future = executor.submit(initialize_clamav)
         yara_future = executor.submit(preload_yara_rules, YARA_RULES_DIR)
@@ -1691,33 +1708,41 @@ def main():
         ml_future.result()
         excluded_yara_rules = set(excluded_rules_future.result())
 
-    # Compute database hash
-    _global_db_state_hash = get_database_state_hash(
-        os.path.join(script_dir, "clamav", "database"), YARA_RULES_DIR, ML_RESULTS_JSON
-    )
+    # --- Manage Cache Validity ---
+    # 1. Compute current database hash
+    current_db_hash = get_database_state_hash(clamav_database_directory_path, YARA_RULES_DIR, ML_RESULTS_JSON)
+    
+    # 2. Load previous hash and the scan cache
+    previous_db_hash = load_db_hash(DB_HASH_FILE)
+    global_scan_cache = load_scan_cache(SCAN_CACHE_FILE)
+    
+    # 3. Invalidate cache if requested by user or if databases have changed
+    if args.clear_cache:
+        logger.info("User requested to clear the scan cache.")
+        global_scan_cache.clear()
+    elif current_db_hash != previous_db_hash:
+        logger.info("Database signatures have changed. Clearing scan cache.")
+        global_scan_cache.clear()
 
-    # Discover files
+    # --- Discover files ---
     target = args.path
+    if not target:
+        logger.error("No target path specified. Please provide a file or directory to scan.")
+        sys.exit(1)
+        
     files_to_scan = list(discover_files_generator(target))
     total_files = len(files_to_scan)
     logger.info(f"Found {total_files} files to scan.")
 
-    # --- Load cache only (no reset, no save) ---
-    try:
-        global_scan_cache = load_scan_cache(SCAN_CACHE_FILE)
-        logger.info("Loaded existing scan cache.")
-    except Exception as e:
-        logger.warning(f"Failed to load scan cache ({e}). Creating a new in-memory cache.")
-        global_scan_cache = {'_database_state_hash': _global_db_state_hash}
-
-    # Start scanning
-    scan_results = start_scan(files_to_scan, _global_db_state_hash, args.max_workers)
-
-    # Save final cache at the end
-    try:
-        save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
-    except Exception as e:
-        logger.error(f"Failed to save scan cache at end: {e}")
+    # --- Start scanning ---
+    scan_results = start_scan(files_to_scan, args.max_workers)
+    
+    # --- Finalize and Save ---
+    # This is the single point where the cache is written to disk for the entire run.
+    logger.info("Saving scan cache and database hash...")
+    save_scan_cache(SCAN_CACHE_FILE, global_scan_cache)
+    save_db_hash(DB_HASH_FILE, current_db_hash)
+    logger.info("Save complete.")
 
 if __name__ == "__main__":
     main()
