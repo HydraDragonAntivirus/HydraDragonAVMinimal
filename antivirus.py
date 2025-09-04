@@ -1227,51 +1227,22 @@ def scan_file_ml(
     pe_file: bool = False,
     signature_check: Optional[Dict[str, Any]] = None,
     benign_threshold: float = 0.93,
-) -> Dict[str, Any]:
+) -> Tuple[bool, str, float]:
     """
-    Perform ML-only scan and return structured result.
-
-    Returns a dict with the following keys:
-      - malware_found: bool            # True if ML declares malware
-      - virus_name: str                # malware name, "Benign", or "Clean"
-      - engine: str                    # "ML" when ML provided a result, else ""
-      - benign: bool                   # True when ML explicitly marks benign
-      - benign_score: Optional[float]  # score from ML (0.0 - 1.0) or None
-      - matched_rules: Optional[list]  # matched rule names or None
-      - error: Optional[str]           # error message if exception occurred
-    Notes:
-      - ML runs only if `pe_file` is True (consistent with previous behavior).
-      - signature_check may be a dict with "is_valid" key; if True, a ".SIG"
-        suffix will be appended to `virus_name` when malware is detected.
-      - `benign_threshold` controls what ML score counts as benign.
+    Perform ML-only scan and return simplified result.
+    Returns (malware_found, virus_name, benign_score)
     """
-    result = {
-        'malware_found': False,
-        'virus_name': 'Clean',
-        'engine': '',
-        'benign': False,
-        'benign_score': None,
-        'matched_rules': None,
-        'error': None,
-    }
-
     try:
         if not pe_file:
             logger.debug("ML scan skipped: not a PE file: %s", file_path)
-            return result
+            return False, 'Clean', 0.0
 
-        # It should return:
-        # (is_malicious_machine_learning: bool, malware_definition: str,
-        #  benign_score: float, matched_rules: list)
+        # Call ML function - it returns 3 values
         ml_out = scan_file_with_machine_learning_ai(file_path)
-        if not isinstance(ml_out, (list, tuple)) or len(ml_out) < 4:
+        if not isinstance(ml_out, (list, tuple)) or len(ml_out) != 3:
             raise ValueError("scan_file_with_machine_learning_ai returned unexpected shape")
 
-        is_malicious_machine_learning, malware_definition, benign_score, matched_rules = ml_out
-
-        result['benign_score'] = benign_score
-        result['matched_rules'] = matched_rules
-        result['engine'] = 'ML'
+        is_malicious_machine_learning, malware_definition, benign_score = ml_out
 
         sig_valid = bool(signature_check and signature_check.get("is_valid", False))
 
@@ -1285,34 +1256,21 @@ def scan_file_ml(
                 # ML -> malware
                 if sig_valid and isinstance(malware_definition, str):
                     malware_definition = f"{malware_definition}.SIG"
-                result.update({
-                    'malware_found': True,
-                    'virus_name': malware_definition,
-                    'benign': False
-                })
                 logger.critical("Infected file detected (ML): %s - Virus: %s", file_path, malware_definition)
+                return True, malware_definition, benign_score
             else:
                 # ML -> benign
-                result.update({
-                    'malware_found': False,
-                    'virus_name': 'Benign',
-                    'benign': True
-                })
                 logger.info("File marked benign by ML (score=%s): %s", benign_score, file_path)
+                return False, 'Benign', benign_score
         else:
             # ML had no opinion / clean
             logger.info("No malware detected by ML: %s", file_path)
-
-        return result
+            return False, 'Clean', benign_score
 
     except Exception as ex:
-        # Never raise here to keep worker wrappers simple - return error metadata
         err_msg = f"ML scan error: {ex}"
         logger.error(err_msg)
-        result['error'] = err_msg
-        # keep virus_name 'Clean' to avoid false positive on upstream
-        result['engine'] = 'ML'
-        return result
+        return False, 'Clean', 0.0
 
 # Load ML definitions
 
