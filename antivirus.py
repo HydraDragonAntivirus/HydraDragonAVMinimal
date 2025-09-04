@@ -1146,7 +1146,7 @@ def scan_file_ml(
 ) -> Tuple[bool, str, float, list]:
     """
     Perform ML-only scan and return simplified result.
-    Returns (malware_found, virus_name, benign_score, matched_rules)
+    Returns (malware_found, virus_name, benign_score)
     """
     try:
         if not pe_file:
@@ -1154,7 +1154,7 @@ def scan_file_ml(
             return False, "Clean", 0.0, []
 
         # Unpack all 4 values
-        is_malicious_ml, malware_definition, benign_score, matched_rules = scan_file_with_machine_learning_ai(file_path)
+        is_malicious_ml, malware_definition, benign_score = scan_file_with_machine_learning_ai(file_path)
 
         sig_valid = bool(signature_check and signature_check.get("is_valid", False))
 
@@ -1171,17 +1171,17 @@ def scan_file_ml(
                     os.path.basename(file_path),
                     malware_definition,
                 )
-                return True, malware_definition, benign_score, matched_rules
+                return True, malware_definition, benign_score
             else:
                 logger.info(
                     "File marked benign by ML (score=%s): %s",
                     benign_score,
                     os.path.basename(file_path),
                 )
-                return False, "Benign", benign_score, matched_rules
+                return False, "Benign", benign_score
         else:
             logger.info("No malware detected by ML: %s", os.path.basename(file_path))
-            return False, "Clean", benign_score, matched_rules
+            return False, "Clean", benign_score
 
     except Exception as ex:
         err_msg = f"ML scan error: {ex}"
@@ -1480,7 +1480,7 @@ def scan_file_worker(file_to_scan: str) -> tuple:
                     clamav_virus_name = scan_file_with_clamav(file_to_scan)
 
                     if clamav_virus_name not in ["Clean", "Error"]:
-                        threat_name = f"ClamAV:{clamav_virus_name}"
+                        threat_name = f"{clamav_virus_name}"
                     else:
                         # Only run ML/YARA if ClamAV is clean
                         result = scan_file_ml(
@@ -1495,12 +1495,12 @@ def scan_file_worker(file_to_scan: str) -> tuple:
                             malware_found, virus_name, benign_score = result
                             matched_rules = []
                         else:
-                            malware_found, virus_name, benign_score, matched_rules = result
+                            malware_found, virus_name, benign_score = result
                         
                         yara_matches = matched_rules or []
 
                         if malware_found:
-                            threat_name = f"ML:{virus_name}"
+                            threat_name = f"{virus_name}"
                         elif virus_name == "Benign":
                             threat_name = "Clean"  # ML white-listed / benign
                         else:
@@ -1508,7 +1508,7 @@ def scan_file_worker(file_to_scan: str) -> tuple:
                             if not yara_matches:
                                 yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
                             if yara_matches:
-                                threat_name = f"YARA:{yara_matches[0]}"
+                                threat_name = f"{yara_matches[0]}"
                             else:
                                 threat_name = "Clean"
                     
