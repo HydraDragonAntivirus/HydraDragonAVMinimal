@@ -29,10 +29,8 @@ YARA_RULES_DIR = os.path.join(script_dir, 'yara')
 EXCLUDED_RULES_FILE = os.path.join(script_dir, 'excluded', 'excluded_rules.txt')
 ML_RESULTS_JSON = os.path.join(script_dir, 'machine_learning', 'results.json')
 
-# --- REFACTORED CACHE AND DB HASH PATHS ---
-DB_STATE_FILE = os.path.join(script_dir, 'db_state.json')
-CLEAN_CACHE_FILE = os.path.join(script_dir, 'clean_hashes.json')
-INFECTED_CACHE_FILE = os.path.join(script_dir, 'infected_hashes.json')
+# --- Simplified Cache ---
+SCAN_CACHE_FILE = os.path.join(script_dir, 'scan_cache.json')
 
 # ClamAV base folder path
 clamav_folder = os.path.join(script_dir, "ClamAV")
@@ -41,12 +39,6 @@ clamav_database_directory_path = os.path.join(clamav_folder, "database")
 
 detectiteasy_dir = os.path.join(script_dir, "detectiteasy")
 detectiteasy_console_path = os.path.join(detectiteasy_dir, "diec.exe")
-
-# Global cache: md5 -> (die_output, plain_text_flag)
-die_cache: dict[str, tuple[str, bool]] = {}
-
-# Separate cache for "binary-only" DIE results
-binary_die_cache: dict[str, str] = {}
 
 # YARA order
 ORDERED_YARA_FILES = [
@@ -60,10 +52,8 @@ _global_yara_compiled: Dict[str, Any] = {}
 
 # Globals for worker processes
 excluded_yara_rules = None
-_global_db_state_hash: Optional[str] = None
-# Global cache objects to be passed to workers
-clean_cache: Dict[str, Any] = {}
-infected_cache: Dict[str, Any] = {}
+# Global cache for scan results: md5 -> {'threat_name': str, 'is_unknown': bool}
+scan_cache: Dict[str, Dict[str, Any]] = {}
 
 # ---------------- Utility functions ----------------
 def compute_md5(path: str) -> str:
@@ -77,62 +67,34 @@ def compute_md5(path: str) -> str:
         logger.error(f"Could not compute MD5 for {path}: {e}")
         return ""
 
-def get_database_state_hash(clamav_db_path: str, yara_rules_dir: str, ml_defs_path: str) -> str:
-    """Generates a hash representing the state of all signature databases."""
-    hasher = hashlib.md5()
-    paths_to_check = []
-
-    # ClamAV databases
-    if os.path.isdir(clamav_db_path):
-        for root, _, files in os.walk(clamav_db_path):
-            for f in files:
-                paths_to_check.append(os.path.join(root, f))
-    
-    # YARA rules
-    if os.path.isdir(yara_rules_dir):
-        for f in ORDERED_YARA_FILES:
-            paths_to_check.append(os.path.join(yara_rules_dir, f))
-
-    # ML definitions
-    paths_to_check.append(ml_defs_path)
-
-    for p in sorted(paths_to_check):
-        if os.path.exists(p):
-            try:
-                stat = os.stat(p)
-                # Use path, mtime, and size to represent state
-                file_state = f"{p}:{stat.st_mtime_ns}:{stat.st_size}\n"
-                hasher.update(file_state.encode())
-            except OSError:
-                continue # Ignore files we can't access
-    
-    return hasher.hexdigest()
-
-def load_json_cache(filepath: str) -> Dict[str, Any]:
-    """Load a generic JSON cache file with error handling."""
-    if not os.path.exists(filepath):
-        return {}
+def load_scan_cache():
+    """Load the scan cache file."""
+    global scan_cache
+    if not os.path.exists(SCAN_CACHE_FILE):
+        scan_cache = {}
+        return
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
+        with open(SCAN_CACHE_FILE, 'r', encoding='utf-8') as f:
             content = f.read().strip()
             if not content:
-                return {}
-            return json.loads(content)
+                scan_cache = {}
+                return
+            scan_cache = json.loads(content)
     except (json.JSONDecodeError, IOError) as e:
-        logger.warning(f"Cache file {filepath} is corrupted or unreadable: {e}. Starting fresh.")
+        logger.warning(f"Cache file {SCAN_CACHE_FILE} is corrupted or unreadable: {e}. Starting fresh.")
         try:
-            os.remove(filepath)
+            os.remove(SCAN_CACHE_FILE)
         except OSError:
             pass
-        return {}
+        scan_cache = {}
 
-def save_json_cache(filepath: str, cache: Dict[str, Any]):
-    """Save a generic JSON cache file."""
+def save_scan_cache():
+    """Save the scan cache file."""
     try:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, indent=4)
+        with open(SCAN_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(scan_cache, f, indent=4)
     except IOError as e:
-        logger.error(f"Could not save cache file {filepath}: {e}")
+        logger.error(f"Could not save cache file {SCAN_CACHE_FILE}: {e}")
 
 # ---------------- YARA preload ----------------
 def preload_yara_rules(rules_dir: str):
@@ -268,43 +230,37 @@ def analyze_file_with_die(file_path):
         logger.error(f"DIE analysis error for {file_path}: {ex}")
         return None
 
-def get_die_output_binary(path: str) -> str:
+def get_die_output_binary(path: str) -> Optional[str]:
     """
-    Returns die_output for a non plain text file, caching by content MD5.
-    (Assumes the file isn't plain text, so always calls analyze_file_with_die()
-     on cache miss.)
+    Returns die_output for a non plain text file.
+    (Assumes the file isn't plain text, so always calls analyze_file_with_die())
     """
-    file_md5 = compute_md5(path)
-    if file_md5 in binary_die_cache:
-        return binary_die_cache[file_md5]
-
-    # First time for this content: run DIE and cache
     die_output = analyze_file_with_die(path)
-    binary_die_cache[file_md5] = die_output
     return die_output
 
 def get_die_output(path: str) -> Tuple[str, bool]:
     """
-    Returns (die_output, plain_text_flag), caching results by content MD5.
+    Returns (die_output, plain_text_flag) without in-memory caching.
     Uses get_die_output_binary() if the file is not plain text.
     """
-    file_md5 = compute_md5(path)
-    if file_md5 in die_cache:
-        return die_cache[file_md5]
-
-    # First time for this content
-    with open(path, "rb") as f:
-        peek = f.read(8192)
+    try:
+        with open(path, "rb") as f:
+            peek = f.read(8192)
+    except IOError:
+        return "Error: Could not read file", False
 
     if is_plain_text(peek):
         die_output = "Binary\n    Format: plain text"
         plain_text_flag = True
     else:
-        die_output = get_die_output_binary(path)  # delegate to binary cache
-        plain_text_flag = False  # skip text detection here
+        die_output = get_die_output_binary(path)
+        plain_text_flag = False
 
-    die_cache[file_md5] = (die_output, plain_text_flag)
+    if die_output is None: # handle case where analyze_file_with_die fails
+        die_output = "Error: DIE analysis failed"
+
     return die_output, plain_text_flag
+
 
 def is_file_fully_unknown(die_output: str) -> bool:
     """
@@ -1115,44 +1071,6 @@ def calculate_similarity(features1: dict, features2: dict) -> float:
 
     return similarity
 
-# Unified cache for all PE feature extractions (replaces both worm_scan_cache and any ML cache)
-unified_pe_cache = {}
-
-def get_cached_pe_features(file_path: str) -> Optional[Dict[str, Any]]:
-    """
-    Extract and cachea PE file numeric features with unified caching.
-    Returns cached features if available, otherwise extracts and caches them.
-    Used by both ML scanning and worm detection.
-    """
-    # Calculate MD5 hash for caching
-    file_md5 = compute_md5(file_path)
-    if not file_md5:
-        return None
-
-    # Check if we already have features for this MD5
-    if file_md5 in unified_pe_cache:
-        logger.debug(f"Using cached features for {file_path} (MD5: {file_md5})")
-        return unified_pe_cache[file_md5]
-
-    try:
-        # Extract numeric features
-        features = pe_extractor.extract_numeric_features(file_path)
-        if features:
-            # Cache the result with MD5 as key
-            unified_pe_cache[file_md5] = features
-            logger.debug(f"Cached features for {file_path} (MD5: {file_md5})")
-            return features
-        else:
-            # Cache negative result too to avoid re-processing failed files
-            unified_pe_cache[file_md5] = None
-            return None
-
-    except Exception as ex:
-        logger.error(f"An error occurred while processing {file_path}: {ex}", exc_info=True)
-        # Cache the failure to avoid repeated attempts
-        unified_pe_cache[file_md5] = None
-        return None
-
 def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
     """Scan a file for malicious activity using machine learning definitions loaded from JSON."""
     malware_definition = "Unknown"
@@ -1162,8 +1080,8 @@ def scan_file_with_machine_learning_ai(file_path, threshold=0.86):
     except pefile.PEFormatError:
         return False, malware_definition, 0
 
-    # Use unified cache for feature extraction
-    file_numeric_features = get_cached_pe_features(file_path)
+    # Extract features directly, no caching
+    file_numeric_features = pe_extractor.extract_numeric_features(file_path)
     if not file_numeric_features:
         return False, "Feature-Extraction-Failed", 0
 
@@ -1522,75 +1440,105 @@ def log_scan_result(file_path: str, md5: str, threat_name: str, yara_rules: list
 # ---------------- Per-file Processing ----------------
 def scan_file_worker(file_to_scan: str) -> tuple:
     """
-    Worker function that scans a single file.
-    Returns essential info: (file_path, threat_name, md5, yara_rules)
+    Worker function that scans a single file, using a cache.
+    Returns essential info: (file_path, threat_name, md5, yara_rules, is_unknown)
     """
-    
-    # ADD: Retry logic for scan failures
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # --- Initial check and MD5 calculation ---
-            if not os.path.exists(file_to_scan) or os.path.getsize(file_to_scan) == 0:
-                return (file_to_scan, "Error: File not found or empty", None, [])
+    try:
+        # --- Initial check and MD5 calculation ---
+        if not os.path.exists(file_to_scan) or os.path.getsize(file_to_scan) == 0:
+            return (file_to_scan, "Error: File not found or empty", None, [], False)
 
-            md5_hash = compute_md5(file_to_scan)
-            if not md5_hash:
-                return (file_to_scan, "Error: Could not compute MD5", None, [])
+        md5_hash = compute_md5(file_to_scan)
+        if not md5_hash:
+            return (file_to_scan, "Error: Could not compute MD5", None, [], False)
 
-            # --- SCANNING PIPELINE ---
-            clamav_virus_name = scan_file_with_clamav(file_to_scan)
-            yara_matches = []
+        # --- Check cache first ---
+        with thread_lock:
+            cached_result = scan_cache.get(md5_hash)
+        
+        if cached_result is not None and isinstance(cached_result, dict):
+            # Result is cached, skip full scan
+            return (file_to_scan, cached_result.get('threat_name', 'Error'), md5_hash, [], cached_result.get('is_unknown', False))
 
-            if clamav_virus_name not in ["Clean", "Error"]:
-                threat_name = f"ClamAV:{clamav_virus_name}"
-            else:
-                # Only run ML/YARA if ClamAV is clean
+        # --- If not cached, perform the full scan ---
+        threat_name = "Clean"  # Default result
+        yara_matches = []
+        is_unknown = False # Default
+        
+        # --- Check if file is fully unknown by DIE ---
+        die_output, _ = get_die_output(file_to_scan)
+        if is_file_fully_unknown(die_output):
+            logger.info(f"Skipping scan for fully unknown file: {os.path.basename(file_to_scan)}")
+            threat_name = "Clean" # Treat as clean and cache it
+            is_unknown = True
+        else:
+            # Add retry logic for the actual scanning part
+            max_retries = 3
+            for attempt in range(max_retries):
                 try:
-                    result = scan_file_ml(
-                        file_to_scan,
-                        pe_file=True,
-                        signature_check=None,
-                        benign_threshold=0.93
-                    )
+                    # --- SCANNING PIPELINE ---
+                    clamav_virus_name = scan_file_with_clamav(file_to_scan)
 
-                    # Handle old ML return paths that may return only 3 values
-                    if len(result) == 3:
-                        malware_found, virus_name, benign_score = result
-                        matched_rules = []
+                    if clamav_virus_name not in ["Clean", "Error"]:
+                        threat_name = f"ClamAV:{clamav_virus_name}"
                     else:
-                        malware_found, virus_name, benign_score, matched_rules = result
+                        # Only run ML/YARA if ClamAV is clean
+                        result = scan_file_ml(
+                            file_to_scan,
+                            pe_file=True,
+                            signature_check=None,
+                            benign_threshold=0.93
+                        )
 
+                        # Handle old ML return paths that may return only 3 values
+                        if len(result) == 3:
+                            malware_found, virus_name, benign_score = result
+                            matched_rules = []
+                        else:
+                            malware_found, virus_name, benign_score, matched_rules = result
+                        
+                        yara_matches = matched_rules or []
+
+                        if malware_found:
+                            threat_name = f"ML:{virus_name}"
+                        elif virus_name == "Benign":
+                            threat_name = "Clean"  # ML white-listed / benign
+                        else:
+                            # ML gave no opinion or error -> fallback to YARA
+                            if not yara_matches:
+                                yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
+                            if yara_matches:
+                                threat_name = f"YARA:{yara_matches[0]}"
+                            else:
+                                threat_name = "Clean"
+                    
+                    # If scan was successful, break the retry loop
+                    break
+                    
                 except Exception as e:
-                    logger.warning(f"ML scan failed for {file_to_scan}: {e}")
-                    malware_found, virus_name, benign_score, matched_rules = False, "Error", 0.0, []
-
-                # Use ML matched rules if any
-                yara_matches = matched_rules or []
-
-                if malware_found:
-                    threat_name = f"ML:{virus_name}"
-                elif virus_name == "Benign":
-                    threat_name = "Clean"  # ML white-listed / benign
-                else:
-                    # ML gave no opinion or error -> fallback to YARA if no rules yet
-                    if not yara_matches:
-                        yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
-                    if yara_matches:
-                        threat_name = f"YARA:{yara_matches[0]}"
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Scan attempt {attempt + 1} failed for {file_to_scan}: {e}. Retrying...")
+                        time.sleep(0.1)  # Brief pause before retry
                     else:
-                        threat_name = "Clean"
+                        logger.error(f"All {max_retries} scan attempts failed for {file_to_scan}: {e}")
+                        threat_name = "Error: Scan failed after retries"
+                    
+        # --- Update cache with the new result ---
+        # Do not cache errors
+        if not threat_name.startswith("Error"):
+            with thread_lock:
+                scan_cache[md5_hash] = {
+                    'threat_name': threat_name,
+                    'is_unknown': is_unknown
+                }
+        
+        return (file_to_scan, threat_name, md5_hash, yara_matches, is_unknown)
 
-            return (file_to_scan, threat_name, md5_hash, yara_matches)
-            
-        except Exception as e:
-            if attempt < max_retries - 1:
-                logger.warning(f"Scan attempt {attempt + 1} failed for {file_to_scan}: {e}. Retrying...")
-                time.sleep(0.1)  # Brief pause before retry
-                continue
-            else:
-                logger.error(f"All {max_retries} scan attempts failed for {file_to_scan}: {e}")
-                return (file_to_scan, "Error: Scan failed after retries", None, [])
+    except Exception as e:
+        # Catch errors from initial MD5 calculation or other setup issues
+        logger.error(f"Unhandled error in worker for {file_to_scan}: {e}")
+        return (file_to_scan, "Error: Unhandled worker error", None, [], False)
+
 
 # ---------------- Real-time JSON writer ----------------
 class RealTimeJSONWriter:
@@ -1614,7 +1562,7 @@ class RealTimeJSONWriter:
             self.file_handle.write("\n]\n")
             self.file_handle.close()
 
-    def write_result(self, file_path: str, threat_name: str, md5: str):
+    def write_result(self, file_path: str, threat_name: str, md5: str, is_unknown: bool):
         """Write single result immediately. Avoid logging file paths and skip errors."""
         # Skip errors completely
         if threat_name.startswith("Error"):
@@ -1626,7 +1574,8 @@ class RealTimeJSONWriter:
         result = {
             'id': md5,  # unique identifier (hash only)
             'is_threat': threat_name != "Clean",
-            'threat_name': threat_name
+            'threat_name': threat_name,
+            'is_unknown': is_unknown
         }
 
         json.dump(result, self.file_handle, ensure_ascii=False)
@@ -1645,6 +1594,10 @@ def main():
     if not os.path.exists(target):
         logger.critical(f"Target not found: {target}")
         sys.exit(6)
+
+    # --- Load existing cache ---
+    logger.info("Loading scan result cache...")
+    load_scan_cache()
     
     # --- ONE-TIME INITIALIZATION (PARALLEL LOADING) ---
     logger.info("Loading antivirus components...")
@@ -1698,10 +1651,11 @@ def main():
             with tqdm(total=total_files, desc="Scanning", unit="files") as pbar:
                 for fut in as_completed(futures):
                     try:
-                        file_path, threat_name, md5_hash, yara_rules = fut.result()
+                        file_path, threat_name, md5_hash, yara_rules, is_unknown = fut.result()
                         
                         # Write result immediately
-                        json_writer.write_result(file_path, threat_name, md5_hash)
+                        if md5_hash:
+                            json_writer.write_result(file_path, threat_name, md5_hash, is_unknown)
                         
                         # Only log threats, not clean files
                         if threat_name != "Clean" and not threat_name.startswith('Error'):
@@ -1711,11 +1665,15 @@ def main():
                         pbar.update(1)
                         
                     except Exception as e:
-                        logger.error(f"Error scanning {futures[fut]}: {e}")
+                        logger.error(f"Error processing result for {futures[fut]}: {e}")
                         pbar.update(1)
     
     elapsed = time.perf_counter() - start_wall
     logger.info(f"Scan completed in {elapsed:.2f}s. {threats_found} threats found. Results: {args.output}")
+
+    # --- Save updated cache ---
+    logger.info("Saving scan result cache...")
+    save_scan_cache()
 
 if __name__ == "__main__":
     main()
