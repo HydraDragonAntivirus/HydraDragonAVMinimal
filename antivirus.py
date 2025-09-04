@@ -1545,17 +1545,25 @@ def scan_file_worker(file_to_scan: str) -> tuple:
     else:
         # Only run ML/YARA if ClamAV is clean
         try:
-            malware_found, virus_name, benign_score, matched_rules = scan_file_ml(
+            result = scan_file_ml(
                 file_to_scan,
                 pe_file=True,
                 signature_check=None,
                 benign_threshold=0.93
             )
+
+            # Handle old ML return paths that may return only 3 values
+            if len(result) == 3:
+                malware_found, virus_name, benign_score = result
+                matched_rules = []
+            else:
+                malware_found, virus_name, benign_score, matched_rules = result
+
         except Exception as e:
             logger.warning(f"ML scan failed for {file_to_scan}: {e}")
             malware_found, virus_name, benign_score, matched_rules = False, "Error", 0.0, []
 
-        # Use matched_rules from ML if present
+        # Use ML matched rules if any
         yara_matches = matched_rules or []
 
         if malware_found:
@@ -1563,7 +1571,7 @@ def scan_file_worker(file_to_scan: str) -> tuple:
         elif virus_name == "Benign":
             threat_name = "Clean"  # ML white-listed / benign
         else:
-            # ML gave no opinion or error -> fallback to YARA
+            # ML gave no opinion or error -> fallback to YARA if no rules yet
             if not yara_matches:
                 yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
             if yara_matches:
@@ -1575,8 +1583,7 @@ def scan_file_worker(file_to_scan: str) -> tuple:
 
 # ---------------- Real-time JSON writer ----------------
 class RealTimeJSONWriter:
-    """Writes JSON results in real-time without storing in memory.
-       Stores only hash and threat info, no file paths.
+    """Writes only file basenames in real-time (one JSON array of strings).
        Skips error entries entirely.
     """
 
@@ -1596,23 +1603,18 @@ class RealTimeJSONWriter:
             self.file_handle.close()
 
     def write_result(self, file_path: str, threat_name: str, md5: str):
-        """Write single result immediately. Avoid logging file paths and skip errors."""
+        """Write only the basename for successful entries; skip errors."""
         # Skip errors completely
-        if threat_name.startswith("Error"):
+        if isinstance(threat_name, str) and threat_name.startswith("Error"):
             return
 
         if not self.first_entry:
             self.file_handle.write(",\n")
 
-        result = {
-            'id': md5,  # unique identifier (hash only)
-            'status': 'scanned',
-            'is_threat': threat_name != "Clean",
-            'threat_name': threat_name
-        }
-
-        json.dump(result, self.file_handle, ensure_ascii=False)
-        self.file_handle.flush()  # Ensure immediate write
+        # Write only the basename (no status field)
+        basename = os.path.basename(file_path)
+        json.dump(basename, self.file_handle, ensure_ascii=False)
+        self.file_handle.flush()
         self.first_entry = False
 
 def main():
