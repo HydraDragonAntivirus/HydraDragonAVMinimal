@@ -1227,28 +1227,22 @@ def scan_file_ml(
     pe_file: bool = False,
     signature_check: Optional[Dict[str, Any]] = None,
     benign_threshold: float = 0.93,
-) -> Tuple[bool, str, float]:
+) -> Tuple[bool, str, float, list]:
     """
     Perform ML-only scan and return simplified result.
-    Returns (malware_found, virus_name, benign_score)
+    Returns (malware_found, virus_name, benign_score, matched_rules)
     """
     try:
         if not pe_file:
-            logger.debug("ML scan skipped: not a PE file: %s", file_path)
-            return False, 'Clean', 0.0
+            logger.debug("ML scan skipped: not a PE file: %s", os.path.basename(file_path))
+            return False, "Clean", 0.0, []
 
-        # Call ML function - it returns 3 values
-        ml_out = scan_file_with_machine_learning_ai(file_path)
-        if not isinstance(ml_out, (list, tuple)) or len(ml_out) != 3:
-            raise ValueError("scan_file_with_machine_learning_ai returned unexpected shape")
-
-        is_malicious_machine_learning, malware_definition, benign_score = ml_out
+        # Unpack all 4 values
+        is_malicious_ml, malware_definition, benign_score, matched_rules = scan_file_with_machine_learning_ai(file_path)
 
         sig_valid = bool(signature_check and signature_check.get("is_valid", False))
 
-        # ML reported something (could be malware or high-score benign)
-        if is_malicious_machine_learning:
-            # nil-safe clamp for benign_score
+        if is_malicious_ml:
             if benign_score is None:
                 benign_score = 0.0
             # Decide malware vs benign using threshold
@@ -1256,19 +1250,27 @@ def scan_file_ml(
                 # ML -> malware
                 if sig_valid and isinstance(malware_definition, str):
                     malware_definition = f"{malware_definition}.SIG"
-                return True, malware_definition, benign_score
+                logger.critical(
+                    "Infected file detected (ML): %s - Virus: %s",
+                    os.path.basename(file_path),
+                    malware_definition,
+                )
+                return True, malware_definition, benign_score, matched_rules
             else:
-                # ML -> benign
-                logger.info("File marked benign by ML (score=%s): %s", benign_score, file_path)
-                return False, 'Benign', benign_score
+                logger.info(
+                    "File marked benign by ML (score=%s): %s",
+                    benign_score,
+                    os.path.basename(file_path),
+                )
+                return False, "Benign", benign_score, matched_rules
         else:
-            # ML had no opinion / clean
-            return False, 'Clean', benign_score
+            logger.info("No malware detected by ML: %s", os.path.basename(file_path))
+            return False, "Clean", benign_score, matched_rules
 
     except Exception as ex:
         err_msg = f"ML scan error: {ex}"
         logger.error(err_msg)
-        return False, 'Clean', 0.0
+        return False, "Clean", 0.0, []
 
 # Load ML definitions
 
@@ -1543,7 +1545,7 @@ def scan_file_worker(file_to_scan: str) -> tuple:
     else:
         # Only run ML/YARA if ClamAV is clean
         try:
-            malware_found, virus_name, benign_score = scan_file_ml(
+            malware_found, virus_name, benign_score, matched_rules = scan_file_ml(
                 file_to_scan,
                 pe_file=True,
                 signature_check=None,
@@ -1551,7 +1553,10 @@ def scan_file_worker(file_to_scan: str) -> tuple:
             )
         except Exception as e:
             logger.warning(f"ML scan failed for {file_to_scan}: {e}")
-            malware_found, virus_name, benign_score = False, "Error", 0.0
+            malware_found, virus_name, benign_score, matched_rules = False, "Error", 0.0, []
+
+        # Use matched_rules from ML if present
+        yara_matches = matched_rules or []
 
         if malware_found:
             threat_name = f"ML:{virus_name}"
@@ -1559,7 +1564,8 @@ def scan_file_worker(file_to_scan: str) -> tuple:
             threat_name = "Clean"  # ML white-listed / benign
         else:
             # ML gave no opinion or error -> fallback to YARA
-            yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
+            if not yara_matches:
+                yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
             if yara_matches:
                 threat_name = f"YARA:{yara_matches[0]}"
             else:
