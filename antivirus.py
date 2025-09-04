@@ -19,6 +19,7 @@ import yara
 import yara_x
 import pefile
 import chardet
+import die
 from tqdm import tqdm
 import clamav
 from hydra_logger import script_dir, logger
@@ -228,25 +229,45 @@ def is_plain_text(data: bytes,
 
 def analyze_file_with_die(file_path):
     """
-    Runs Detect It Easy (DIE) on the given file once and returns the DIE output (plain text).
-    The output is also saved to a unique .txt file and displayed to the user.
+    Runs native Detect It Easy (DIE) on the given file and returns the DIE output (plain text).
+    Optimized version that doesn't save results to disk.
     """
     try:
-        # Run the DIE command once with the -p flag for plain output
-        result = subprocess.run(
-            [detectiteasy_console_path, "-p", file_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="ignore"
-        )
+        # Run native DIE scan
+        result = die.scan_file(file_path, die.ScanFlags.RESULT_AS_JSON)
+        
+        # Format output to match original plain text format
+        if not result or 'detects' not in result:
+            stdout_output = "Binary\n    Unknown: Unknown"
+        else:
+            output_lines = ["Binary"]
+            for detect in result['detects']:
+                if 'values' in detect:
+                    for value in detect['values']:
+                        name = value.get('name', 'Unknown')
+                        version = value.get('version', '')
+                        type_info = value.get('type', '')
+                        info = value.get('info', '')
+                        
+                        if version:
+                            line = f"    {type_info}: {name}({version})"
+                        else:
+                            line = f"    {type_info}: {name}"
+                        
+                        if info:
+                            line += f"[{info}]"
+                        
+                        output_lines.append(line)
+            
+            if len(output_lines) == 1:
+                output_lines.append("    Unknown: Unknown")
+            
+            stdout_output = "\n".join(output_lines)
 
-        return result.stdout
+        return stdout_output
 
-    except subprocess.SubprocessError as ex:
-        error_msg = f"Error in {inspect.currentframe().f_code.co_name} while running Detect It Easy for {file_path}: {ex}"
-        logger.error(error_msg)
-        return None
     except Exception as ex:
-        error_msg = f"General error in {inspect.currentframe().f_code.co_name} while running Detect It Easy for {file_path}: {ex}"
-        logger.error(error_msg)
+        logger.error(f"DIE analysis error for {file_path}: {ex}")
         return None
 
 def get_die_output_binary(path: str) -> str:
@@ -1525,16 +1546,20 @@ def load_ml_definitions(filepath: str) -> bool:
 
 # ---------------- Result logging ----------------
 def log_scan_result(file_path: str, md5: str, threat_name: str, yara_rules: list = None):
-    """Minimal logging - only log threats, not clean files."""
+    """Minimal logging - only log threats, not clean files.
+       Uses MD5 or basename instead of full file path."""
     if threat_name != "Clean":
-        logger.warning(f"THREAT: {os.path.basename(file_path)} | {threat_name}")
-        
+        logger.warning(f"THREAT: {md5} | {threat_name}")
+
         # Only log YARA FP if needed
         if yara_rules:
             fp_log_path = "yara_falsepositives.log"
             try:
                 with open(fp_log_path, "a", encoding="utf-8") as fp_log:
-                    fp_log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {file_path} | {md5} | {', '.join(yara_rules)}\n")
+                    fp_log.write(
+                        f"{time.strftime('%Y-%m-%d %H:%M:%S')} | "
+                        f"{md5} | {', '.join(yara_rules)}\n"
+                    )
             except Exception as e:
                 logger.error(f"Could not write YARA FP log: {e}")
 
@@ -1591,36 +1616,36 @@ def scan_file_worker(file_to_scan: str) -> tuple:
 
 # ---------------- Real-time JSON writer ----------------
 class RealTimeJSONWriter:
-    """Writes JSON results in real-time without storing in memory."""
-    
+    """Writes JSON results in real-time without storing in memory.
+       Stores only hash and threat info, no file paths."""
+
     def __init__(self, output_file: str):
         self.output_file = output_file
         self.file_handle = None
         self.first_entry = True
-        
+
     def __enter__(self):
         self.file_handle = open(self.output_file, "w", encoding="utf-8")
         self.file_handle.write("[\n")
         return self
-        
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.file_handle:
             self.file_handle.write("\n]\n")
             self.file_handle.close()
-            
+
     def write_result(self, file_path: str, threat_name: str, md5: str):
-        """Write single result immediately."""
+        """Write single result immediately. Avoid logging file paths."""
         if not self.first_entry:
             self.file_handle.write(",\n")
-            
+
         result = {
-            'file': file_path,
+            'id': md5,  # unique identifier (hash only)
             'status': 'scanned' if not threat_name.startswith('Error') else 'error',
-            'md5': md5,
             'is_threat': threat_name != "Clean" and not threat_name.startswith('Error'),
             'threat_name': threat_name
         }
-        
+
         json.dump(result, self.file_handle, ensure_ascii=False)
         self.file_handle.flush()  # Ensure immediate write
         self.first_entry = False
