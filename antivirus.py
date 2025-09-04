@@ -1626,14 +1626,23 @@ def main():
             sys.exit(1)
     
     # --- FILE DISCOVERY ---
+    # Hardcoded list of YARA .yrc files and ML results.json to skip
+    EXCLUDED_SIGNATURE_FILES = set(ORDERED_YARA_FILES + [os.path.basename(ML_RESULTS_JSON)])
+
     all_files = []
     if os.path.isdir(target):
         for root, _, files in os.walk(target):
             for fname in files:
+                if fname in EXCLUDED_SIGNATURE_FILES:
+                    logger.info(f"Skipping signature file: {fname}")
+                    continue
                 all_files.append(os.path.join(root, fname))
     else:
-        all_files = [target]
-    
+        if os.path.basename(target) not in EXCLUDED_SIGNATURE_FILES:
+            all_files = [target]
+        else:
+            logger.info(f"Skipping signature file: {os.path.basename(target)}")
+
     total_files = len(all_files)
     logger.info(f"Starting scan of {total_files} files...")
     
