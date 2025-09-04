@@ -1458,18 +1458,24 @@ def scan_file_worker(file_to_scan: str) -> tuple:
         
         if cached_result is not None and isinstance(cached_result, dict):
             # Result is cached, skip full scan
-            return (file_to_scan, cached_result.get('threat_name', 'Error'), md5_hash, [], cached_result.get('is_unknown', False))
+            return (
+                file_to_scan,
+                cached_result.get('threat_name', 'Error'),
+                md5_hash,
+                [],  # no yara matches from cache
+                cached_result.get('is_unknown', False)
+            )
 
         # --- If not cached, perform the full scan ---
         threat_name = "Clean"  # Default result
         yara_matches = []
-        is_unknown = False # Default
+        is_unknown = False  # Default
         
         # --- Check if file is fully unknown by DIE ---
         die_output, _ = get_die_output(file_to_scan)
         if is_file_fully_unknown(die_output):
             logger.info(f"Skipping scan for fully unknown file: {os.path.basename(file_to_scan)}")
-            threat_name = "Clean" # Treat as clean and cache it
+            threat_name = "Clean"  # Treat as clean and cache it
             is_unknown = True
         else:
             # Add retry logic for the actual scanning part
@@ -1480,37 +1486,31 @@ def scan_file_worker(file_to_scan: str) -> tuple:
                     clamav_virus_name = scan_file_with_clamav(file_to_scan)
 
                     if clamav_virus_name not in ["Clean", "Error"]:
-                        threat_name = f"{clamav_virus_name}"
+                        threat_name = clamav_virus_name
                     else:
                         # Only run ML/YARA if ClamAV is clean
-                        result = scan_file_ml(
+                        malware_found, virus_name, benign_score = scan_file_ml(
                             file_to_scan,
                             pe_file=True,
                             signature_check=None,
                             benign_threshold=0.93
                         )
 
-                        # Handle old ML return paths that may return only 3 values
-                        if len(result) == 3:
-                            malware_found, virus_name, benign_score = result
-                            matched_rules = []
-                        else:
-                            malware_found, virus_name, benign_score = result
-                        
-                        yara_matches = matched_rules or []
-
                         if malware_found:
-                            threat_name = f"{virus_name}"
+                            threat_name = virus_name
                         elif virus_name == "Benign":
                             threat_name = "Clean"  # ML white-listed / benign
                         else:
                             # ML gave no opinion or error -> fallback to YARA
-                            if not yara_matches:
-                                yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
+                            yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
                             if yara_matches:
-                                threat_name = f"{yara_matches[0]}"
+                                threat_name = yara_matches[0]
                             else:
-                                threat_name = "Clean"
+                                # If ML explicitly said "Unknown", preserve it
+                                if virus_name == "Unknown":
+                                    threat_name = "Unknown"
+                                else:
+                                    threat_name = "Clean"
                     
                     # If scan was successful, break the retry loop
                     break
