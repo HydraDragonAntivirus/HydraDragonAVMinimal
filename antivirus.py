@@ -1539,7 +1539,6 @@ def scan_file_worker(file_to_scan: str) -> tuple:
         logger.error(f"Unhandled error in worker for {file_to_scan}: {e}")
         return (file_to_scan, "Error: Unhandled worker error", None, [], False)
 
-
 # ---------------- Real-time JSON writer ----------------
 class RealTimeJSONWriter:
     """Writes JSON results in real-time without storing in memory.
