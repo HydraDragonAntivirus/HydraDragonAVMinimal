@@ -1545,25 +1545,22 @@ def scan_file_worker(file_to_scan: str) -> tuple:
     else:
         # Only run ML/YARA if ClamAV is clean
         try:
-            ml_res = scan_file_ml(file_to_scan, pe_file=True, signature_check=None, benign_threshold=0.93)
+            malware_found, virus_name, benign_score = scan_file_ml(
+                file_to_scan,
+                pe_file=True,
+                signature_check=None,
+                benign_threshold=0.93
+            )
         except Exception as e:
             logger.warning(f"ML scan failed for {file_to_scan}: {e}")
-            ml_res = None
+            malware_found, virus_name, benign_score = False, "Error", 0.0
 
-        if ml_res:
-            if ml_res.get("malware_found"):
-                threat_name = f"ML:{ml_res.get('virus_name', 'Unknown')}"
-            elif ml_res.get("benign"):
-                threat_name = "Clean"  # ML white-listed / benign
-            else:
-                # ML gave no opinion or error -> fallback to YARA
-                yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
-                if yara_matches:
-                    threat_name = f"YARA:{yara_matches[0]}"
-                else:
-                    threat_name = "Clean"
+        if malware_found:
+            threat_name = f"ML:{virus_name}"
+        elif virus_name == "Benign":
+            threat_name = "Clean"  # ML white-listed / benign
         else:
-            # fallback if ML fails entirely
+            # ML gave no opinion or error -> fallback to YARA
             yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
             if yara_matches:
                 threat_name = f"YARA:{yara_matches[0]}"
