@@ -1656,8 +1656,8 @@ def main():
                         if md5_hash:
                             json_writer.write_result(file_path, threat_name, md5_hash, is_unknown)
                         
-                        # Only log threats, not clean files
-                        if threat_name != "Clean" and not threat_name.startswith('Error'):
+                        # Log anything that is not Clean and not an Error
+                        if threat_name not in ("Clean", "Unknown") and not threat_name.startswith("Error"):
                             log_scan_result(file_path, md5_hash, threat_name, yara_rules)
                             threats_found += 1
                         
