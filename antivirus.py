@@ -1256,7 +1256,6 @@ def scan_file_ml(
                 # ML -> malware
                 if sig_valid and isinstance(malware_definition, str):
                     malware_definition = f"{malware_definition}.SIG"
-                logger.critical("Infected file detected (ML): %s - Virus: %s", file_path, malware_definition)
                 return True, malware_definition, benign_score
             else:
                 # ML -> benign
@@ -1264,7 +1263,6 @@ def scan_file_ml(
                 return False, 'Benign', benign_score
         else:
             # ML had no opinion / clean
-            logger.info("No malware detected by ML: %s", file_path)
             return False, 'Clean', benign_score
 
     except Exception as ex:
