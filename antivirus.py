@@ -1651,7 +1651,7 @@ def main():
     threats_found = 0
     
     with RealTimeJSONWriter(args.output) as json_writer:
-        with ThreadPoolExecutor(max_workers=100) as executor:  # Reduced workers
+        with ThreadPoolExecutor(max_workers=1000) as executor:
             # Submit all tasks
             futures = {executor.submit(scan_file_worker, f): f for f in all_files}
             
