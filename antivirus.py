@@ -1525,59 +1525,72 @@ def scan_file_worker(file_to_scan: str) -> tuple:
     Worker function that scans a single file.
     Returns essential info: (file_path, threat_name, md5, yara_rules)
     """
-
-    # --- Initial check and MD5 calculation ---
-    if not os.path.exists(file_to_scan) or os.path.getsize(file_to_scan) == 0:
-        return (file_to_scan, "Error: File not found or empty", None, [])
-
-    md5_hash = compute_md5(file_to_scan)
-    if not md5_hash:
-        return (file_to_scan, "Error: Could not compute MD5", None, [])
-
-    # --- SCANNING PIPELINE ---
-    clamav_virus_name = scan_file_with_clamav(file_to_scan)
-    yara_matches = []
-
-    if clamav_virus_name not in ["Clean", "Error"]:
-        threat_name = f"ClamAV:{clamav_virus_name}"
-    else:
-        # Only run ML/YARA if ClamAV is clean
+    
+    # ADD: Retry logic for scan failures
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            result = scan_file_ml(
-                file_to_scan,
-                pe_file=True,
-                signature_check=None,
-                benign_threshold=0.93
-            )
+            # --- Initial check and MD5 calculation ---
+            if not os.path.exists(file_to_scan) or os.path.getsize(file_to_scan) == 0:
+                return (file_to_scan, "Error: File not found or empty", None, [])
 
-            # Handle old ML return paths that may return only 3 values
-            if len(result) == 3:
-                malware_found, virus_name, benign_score = result
-                matched_rules = []
+            md5_hash = compute_md5(file_to_scan)
+            if not md5_hash:
+                return (file_to_scan, "Error: Could not compute MD5", None, [])
+
+            # --- SCANNING PIPELINE ---
+            clamav_virus_name = scan_file_with_clamav(file_to_scan)
+            yara_matches = []
+
+            if clamav_virus_name not in ["Clean", "Error"]:
+                threat_name = f"ClamAV:{clamav_virus_name}"
             else:
-                malware_found, virus_name, benign_score, matched_rules = result
+                # Only run ML/YARA if ClamAV is clean
+                try:
+                    result = scan_file_ml(
+                        file_to_scan,
+                        pe_file=True,
+                        signature_check=None,
+                        benign_threshold=0.93
+                    )
 
+                    # Handle old ML return paths that may return only 3 values
+                    if len(result) == 3:
+                        malware_found, virus_name, benign_score = result
+                        matched_rules = []
+                    else:
+                        malware_found, virus_name, benign_score, matched_rules = result
+
+                except Exception as e:
+                    logger.warning(f"ML scan failed for {file_to_scan}: {e}")
+                    malware_found, virus_name, benign_score, matched_rules = False, "Error", 0.0, []
+
+                # Use ML matched rules if any
+                yara_matches = matched_rules or []
+
+                if malware_found:
+                    threat_name = f"ML:{virus_name}"
+                elif virus_name == "Benign":
+                    threat_name = "Clean"  # ML white-listed / benign
+                else:
+                    # ML gave no opinion or error -> fallback to YARA if no rules yet
+                    if not yara_matches:
+                        yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
+                    if yara_matches:
+                        threat_name = f"YARA:{yara_matches[0]}"
+                    else:
+                        threat_name = "Clean"
+
+            return (file_to_scan, threat_name, md5_hash, yara_matches)
+            
         except Exception as e:
-            logger.warning(f"ML scan failed for {file_to_scan}: {e}")
-            malware_found, virus_name, benign_score, matched_rules = False, "Error", 0.0, []
-
-        # Use ML matched rules if any
-        yara_matches = matched_rules or []
-
-        if malware_found:
-            threat_name = f"ML:{virus_name}"
-        elif virus_name == "Benign":
-            threat_name = "Clean"  # ML white-listed / benign
-        else:
-            # ML gave no opinion or error -> fallback to YARA if no rules yet
-            if not yara_matches:
-                yara_matches = scan_file_with_yara_sequentially(file_to_scan, excluded_yara_rules)
-            if yara_matches:
-                threat_name = f"YARA:{yara_matches[0]}"
+            if attempt < max_retries - 1:
+                logger.warning(f"Scan attempt {attempt + 1} failed for {file_to_scan}: {e}. Retrying...")
+                time.sleep(0.1)  # Brief pause before retry
+                continue
             else:
-                threat_name = "Clean"
-
-    return (file_to_scan, threat_name, md5_hash, yara_matches)
+                logger.error(f"All {max_retries} scan attempts failed for {file_to_scan}: {e}")
+                return (file_to_scan, "Error: Scan failed after retries", None, [])
 
 # ---------------- Real-time JSON writer ----------------
 class RealTimeJSONWriter:
