@@ -1572,7 +1572,9 @@ def scan_file_worker(file_to_scan: str) -> tuple:
 # ---------------- Real-time JSON writer ----------------
 class RealTimeJSONWriter:
     """Writes JSON results in real-time without storing in memory.
-       Stores only hash and threat info, no file paths."""
+       Stores only hash and threat info, no file paths.
+       Skips error entries entirely.
+    """
 
     def __init__(self, output_file: str):
         self.output_file = output_file
@@ -1590,14 +1592,18 @@ class RealTimeJSONWriter:
             self.file_handle.close()
 
     def write_result(self, file_path: str, threat_name: str, md5: str):
-        """Write single result immediately. Avoid logging file paths."""
+        """Write single result immediately. Avoid logging file paths and skip errors."""
+        # Skip errors completely
+        if threat_name.startswith("Error"):
+            return
+
         if not self.first_entry:
             self.file_handle.write(",\n")
 
         result = {
             'id': md5,  # unique identifier (hash only)
-            'status': 'scanned' if not threat_name.startswith('Error') else 'error',
-            'is_threat': threat_name != "Clean" and not threat_name.startswith('Error'),
+            'status': 'scanned',
+            'is_threat': threat_name != "Clean",
             'threat_name': threat_name
         }
 
